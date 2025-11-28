@@ -8,7 +8,7 @@ shifts and sequencing errors.
 
 import sys
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, InitVar
 from itertools import combinations
 from typing import Literal, Optional
 from zlib import crc32
@@ -52,26 +52,33 @@ class MinimizerParams:
             )
 
 
-@dataclass
+@dataclass(slots=True)
 class ReadPair:
     """Container for a read pair with deduplication support."""
 
     read_id: str
     fwd_seq: str
     rev_seq: str
-    fwd_qual: str
-    rev_qual: str
+    fwd_qual: InitVar[str]  # Passed to init but not stored in the object
+    rev_qual: InitVar[str]  # Passed to init but not stored in the object
+
+    # Store the calculated score instead of the raw strings
+    mean_q: float = field(init=False)
     exemplar_id: Optional[str] = field(default=None, init=False)
 
-    def __post_init__(self):
-        """Ensure sequences are uppercase."""
+    def __post_init__(self, fwd_qual, rev_qual):
+        """Ensure sequences are uppercase and pre-calculate quality."""
         self.fwd_seq = self.fwd_seq.upper()
         self.rev_seq = self.rev_seq.upper()
 
+        # Calculate mean quality once and store it as a float (8 bytes)
+        # instead of keeping the raw strings (~300+ bytes)
+        quals = [ord(c) - 33 for c in fwd_qual + rev_qual]
+        self.mean_q = sum(quals) / len(quals) if quals else 0.0
+
     def mean_qual(self) -> float:
-        """Calculate mean Phred quality across both reads."""
-        quals = [ord(c) - 33 for c in self.fwd_qual + self.rev_qual]
-        return sum(quals) / len(quals) if quals else 0.0
+        """Return the pre-calculated mean quality."""
+        return self.mean_q
 
 
 ##
@@ -330,6 +337,13 @@ def deduplicate_read_pairs(
     buckets = _assign_to_buckets(read_pairs, minimizer_params, dedup_params.orientation)
     graph, comparisons = _build_graph(read_pairs, buckets, dedup_params)
 
+    # Save bucket count for verbose output before freeing memory
+    n_buckets = len(buckets)
+
+    # Delete the buckets index immediately to free memory
+    # before running the connected components logic.
+    del buckets
+
     # Step 2: Find connected components and assign exemplars
     for component in nx.connected_components(graph):
         component_list = list(component)
@@ -344,7 +358,7 @@ def deduplicate_read_pairs(
         n_components = nx.number_connected_components(graph)
         n_edges = graph.number_of_edges()
         print(
-            f"Deduplication: {len(read_pairs)} reads, {len(buckets)} buckets, "
+            f"Deduplication: {len(read_pairs)} reads, {n_buckets} buckets, "
             f"{comparisons} comparisons, {n_edges} edges, {n_components} components"
         )
 
