@@ -31,7 +31,7 @@ reads that differ slightly due to sequencing errors or alignment variations.
 ### Install dependencies
 
 ```bash
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ## Usage
@@ -89,8 +89,11 @@ result = deduplicate_read_pairs(
 ### 1. Minimizer Extraction
 
 Each read is divided into windows, and the lexicographically smallest k-mer
-(minimizer) is extracted from each window. This creates a signature for each
-read pair.
+(minimizer) is extracted from each window. A signature is created for each
+combination of forward_minimizer_hash, reverse_minimizer_hash, so that two
+reads which share a single minimizer in the forward made and a single minimizer
+in the reverse mate will have a signature collision. With default sizes
+this is ~50 signatures per read pair (~7 windows per mate, squared).
 
 ### 2. Bucketing
 
