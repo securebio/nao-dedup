@@ -31,7 +31,7 @@ reads that differ slightly due to sequencing errors or alignment variations.
 ### Install dependencies
 
 ```bash
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ## Usage
