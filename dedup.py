@@ -504,7 +504,7 @@ def deduplicate_read_pairs_streaming(
         read_pairs: Iterable of ReadPair objects to deduplicate
         dedup_params: Parameters controlling deduplication behavior
         minimizer_params: Parameters for minimizer extraction
-        verbose: Print some debug info
+        verbose: If True, print statistics about deduplication
 
     Returns:
         Dict mapping read_id to exemplar_id
@@ -577,8 +577,6 @@ def deduplicate_read_pairs_streaming(
     if verbose:
         n_reads = len(final_mapping)
         n_clusters = len(cluster_leaders)
-        print(
-            f"Deduplication: {n_reads} reads, {n_clusters} clusters"
-        )
+        print(f"Streaming dedup: {n_reads} reads -> {n_clusters} clusters")
 
     return final_mapping
