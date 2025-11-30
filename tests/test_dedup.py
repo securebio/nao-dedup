@@ -847,3 +847,78 @@ class TestCAndPythonDeduplication:
 
         # Should be clustered together
         assert mapping2["r1"] == mapping2["r2"]
+
+    @pytest.mark.fast
+    @pytest.mark.integration
+    def test_cluster_lookup_after_leader_update(self, dedup_func):
+        """
+        Test that cluster lookups work correctly after the best_read_id is updated.
+
+        This test triggers a bug where the cluster hash table uses the initial
+        exemplar ID as its key, but lookups incorrectly compare against best_read_id,
+        which can change during processing.
+
+        Scenario:
+        1. Read A (low quality) creates cluster keyed by "readA"
+        2. Read B (high quality) matches A, updates best_read_id to "readB"
+        3. Read C (low quality) matches A, should find the same cluster
+
+        Bug behavior: Step 3 fails to find the cluster because it hashes "readA"
+        but compares against best_read_id "readB", creating a duplicate cluster.
+        """
+        # Create three identical sequences but with different quality scores
+        seq = "A" * 150
+
+        # Read A: lowest quality - will be the initial exemplar
+        rpA = ReadPair("readA", seq, seq, "!" * 150, "!" * 150)  # Q=0
+
+        # Read B: highest quality - will become the best exemplar
+        rpB = ReadPair("readB", seq, seq, "I" * 150, "I" * 150)  # Q=40
+
+        # Read C: medium quality - should find the existing cluster
+        rpC = ReadPair("readC", seq, seq, "5" * 150, "5" * 150)  # Q=20
+
+        # Process in order A, B, C
+        read_pairs = [rpA, rpB, rpC]
+        result = dedup_func(read_pairs, verbose=False)
+        mapping = _get_exemplar_mapping(result)
+
+        # All three should map to the same cluster
+        exemplars = set(mapping.values())
+        assert len(exemplars) == 1, f"Expected 1 cluster, got {len(exemplars)}: {exemplars}"
+
+        # The best exemplar should be readB (highest quality)
+        assert mapping["readA"] == "readB"
+        assert mapping["readB"] == "readB"
+        assert mapping["readC"] == "readB"
+
+    @pytest.mark.fast
+    @pytest.mark.integration
+    def test_cluster_lookup_multiple_updates(self, dedup_func):
+        """
+        Test cluster lookups with multiple leader updates.
+
+        This extends the previous test with more reads to ensure the bug
+        doesn't create multiple duplicate clusters.
+        """
+        seq = "G" * 150
+
+        # Create 5 reads with varying quality, all identical sequences
+        read_pairs = [
+            ReadPair("read1", seq, seq, "!" * 150, "!" * 150),  # Q=0
+            ReadPair("read2", seq, seq, "#" * 150, "#" * 150),  # Q=2
+            ReadPair("read3", seq, seq, "I" * 150, "I" * 150),  # Q=40 - best
+            ReadPair("read4", seq, seq, "5" * 150, "5" * 150),  # Q=20
+            ReadPair("read5", seq, seq, "(" * 150, "(" * 150),  # Q=7
+        ]
+
+        result = dedup_func(read_pairs, verbose=False)
+        mapping = _get_exemplar_mapping(result)
+
+        # All should map to the same cluster
+        exemplars = set(mapping.values())
+        assert len(exemplars) == 1, f"Expected 1 cluster, got {len(exemplars)}: {exemplars}"
+
+        # All should map to read3 (highest quality)
+        for read_id in ["read1", "read2", "read3", "read4", "read5"]:
+            assert mapping[read_id] == "read3", f"{read_id} mapped to {mapping[read_id]}, expected read3"
