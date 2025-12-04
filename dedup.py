@@ -396,6 +396,15 @@ def _get_stable_keys(rp: ReadPair, params: MinimizerParams) -> set[int]:
     Extract minimizer keys from multiple windows to ensure we find matches
     even if the read has errors at the edges.
 
+    This uses a simpler bucketing strategy than _get_bucket_keys(): instead of
+    generating n² tuple keys (fwd_hash, rev_hash), it returns 2n individual
+    hashes. This trades precision for efficiency:
+    - Fewer keys per read (2n vs n²) = less memory, simpler lookups
+    - More bucket collisions (e.g., reads with same start but different insert
+      lengths, or overlapping regions)
+    - Collisions are acceptable since _find_matching_exemplar() does full
+      sequence comparison anyway
+
     Args:
         rp: ReadPair to extract keys from
         params: Minimizer parameters
