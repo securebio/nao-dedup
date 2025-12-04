@@ -159,8 +159,8 @@ looking up the final best representative for each cluster using a simple diction
 lookup (no re-bucketing or re-matching needed).
 
 **Key Advantages**:
-- **Memory efficient**: Only stores unique sequences
-- **Fast**: Two linear passes through data vs. O(N²) graph construction
+- **Memory efficient**: Stores only unique read sequences and ID mappings (no graph edges)
+- **Simpler**: Avoids graph construction, connected components, and centrality calculations
 
 ## Parameters
 
