@@ -56,7 +56,7 @@ uv pip install -r requirements.txt
 ### Basic Example
 
 ```python
-from dedup import ReadPair, deduplicate_read_pairs_streaming, DedupParams
+from dedup import ReadPair, deduplicate_read_pairs, DedupParams
 
 # Create read pairs
 read_pairs = [
@@ -77,12 +77,13 @@ for rp in result:
 ### Advanced Configuration
 
 ```python
-from dedup import DedupParams, MinimizerParams, ORIENT_STRICT, ORIENT_TOLERANT
+from dedup import deduplicate_read_pairs_streaming, DedupParams, \
+                  MinimizerParams, ORIENT_TOLERANT
 
 # Configure deduplication parameters
 dedup_params = DedupParams(
-    max_offset=1,           # Maximum alignment shift in bases
-    max_error_frac=0.01,    # Maximum 1% mismatch rate
+    max_offset=1,                # Maximum alignment shift in bases
+    max_error_frac=0.01,         # Maximum 1% mismatch rate
     orientation=ORIENT_TOLERANT  # Allow swapped mate pairs
 )
 
@@ -91,9 +92,9 @@ dedup_params = DedupParams(
 # bucket explosions. With default kmer_len=7, there are only 4^7 (~16k)
 # possible sequences.
 minimizer_params = MinimizerParams(
-    num_windows=4,    # Number of windows per read
+    num_windows=3,    # Number of windows per read
     window_len=25,    # Base pairs per window
-    kmer_len=15       # K-mer size (use 15 for large datasets)
+    kmer_len=7        # K-mer size (use 15 for large datasets)
 )
 
 # Run with custom parameters
