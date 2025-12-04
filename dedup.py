@@ -512,11 +512,15 @@ def deduplicate_read_pairs_streaming(
     #    We ONLY store unique reads here. Duplicates are never stored.
     exemplar_db = defaultdict(list)
 
-    # 2. Cluster Leaders: Map from OriginalExemplarID -> ClusterStats
+    # 2. Cluster Leaders: Map from cluster_id -> ClusterStats
+    #    Each cluster is identified by the read_id of the FIRST read that created it.
+    #    This initial read_id becomes the permanent cluster identifier, even if we
+    #    later find a better representative (tracked in ClusterStats.best_read_id).
     cluster_leaders = {}
 
-    # 3. Read-to-Exemplar mapping: Map from read_id -> exemplar_id
-    #    This is what we return
+    # 3. Read-to-Exemplar mapping: Map from read_id -> cluster_id
+    #    Records which cluster each read belongs to (using the cluster_id from #2).
+    #    Resolved to final best exemplar at the end.
     read_to_exemplar = {}
 
     # Single pass: Find clusters and track best representative
