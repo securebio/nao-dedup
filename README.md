@@ -146,16 +146,17 @@ exemplar selection while using significantly less memory:
    unique sequences (exemplars)
 3. **Update or create cluster**:
    - If match found: Check if this read is better than the current cluster
-     representative
+     representative. If so, update the cluster's best representative
    - If no match: Create new cluster with this read as the exemplar
-4. **Track best**: Maintain only the best read seen so far for each cluster
+4. **Record mappings**: Track which cluster each read was assigned to, and maintain
+   the best representative seen so far for each cluster
 
-**Pass 2: Assign Final Exemplars**
+**Pass 2: Resolve Final Exemplars**
 
-1. **Stream through reads again**: Process all reads a second time
-2. **Look up cluster**: Find which cluster each read belongs to (same logic as
-   Pass 1)
-3. **Assign best exemplar**: Use the best representative identified in Pass 1
+During Pass 1, when a better representative is found for a cluster, earlier reads
+in that cluster still point to the old representative. Pass 2 resolves this by
+looking up the final best representative for each cluster using a simple dictionary
+lookup (no re-bucketing or re-matching needed).
 
 **Key Advantages**:
 - **Memory efficient**: Only stores unique sequences
