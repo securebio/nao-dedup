@@ -383,7 +383,7 @@ class Exemplar:
         self.rev_seq = rp.rev_seq
 
 
-@dataclass
+@dataclass(slots=True)
 class ClusterStats:
     """Tracks the best representative seen so far for a cluster."""
     best_read_id: str
