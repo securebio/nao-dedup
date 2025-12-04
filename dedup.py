@@ -409,7 +409,6 @@ def _get_stable_keys(rp: ReadPair, params: MinimizerParams) -> set[int]:
         k_fwd = _extract_minimizer(rp.fwd_seq, i, params)
         k_rev = _extract_minimizer(rp.rev_seq, i, params)
 
-        # -1 is the sentinel for "window too short" or invalid
         if k_fwd != EMPTY_KMER_SENTINEL_HASH:
             keys.add(k_fwd)
         if k_rev != EMPTY_KMER_SENTINEL_HASH:
