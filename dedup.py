@@ -430,8 +430,8 @@ def _calculate_score(rp: ReadPair) -> float:
     """
     Calculate quality score for a read pair.
 
-    Higher scores indicate better reads. Uses total length as primary criterion
-    and mean quality as tiebreaker.
+    Higher scores indicate better reads. Prioritizes mean quality, then total
+    length (consistent with the graph-based algorithm's quality → length ordering).
 
     Args:
         rp: ReadPair to score
@@ -440,8 +440,8 @@ def _calculate_score(rp: ReadPair) -> float:
         Quality score (higher is better)
     """
     length = len(rp.fwd_seq) + len(rp.rev_seq)
-    # Length is primary, Quality is tie-breaker
-    return length + rp.mean_qual()
+    # Quality is primary (scaled up by 1000), length is secondary
+    return rp.mean_qual() * 1000 + length
 
 
 def _find_matching_exemplar(
