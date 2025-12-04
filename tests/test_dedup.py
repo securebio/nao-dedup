@@ -491,13 +491,8 @@ class TestParameterValidation:
 
 
 def _get_exemplar_mapping(result):
-    """Helper to get exemplar mapping from either result type."""
-    if isinstance(result, dict):
-        # Streaming version returns dict
-        return result
-    else:
-        # Graph version returns list
-        return {rp.read_id: rp.exemplar_id for rp in result}
+    """Helper to get exemplar mapping (both algorithms now return dict)."""
+    return result
 
 
 @pytest.mark.parametrize(

@@ -64,7 +64,6 @@ class ReadPair:
 
     # Store the calculated score instead of the raw strings
     mean_q: float = field(init=False)
-    exemplar_id: Optional[str] = field(default=None, init=False)
 
     def __post_init__(self, fwd_qual, rev_qual):
         """Ensure sequences are uppercase and pre-calculate quality."""
@@ -317,7 +316,7 @@ def deduplicate_read_pairs(
     dedup_params: DedupParams = DedupParams(),
     minimizer_params: MinimizerParams = MinimizerParams(),
     verbose: bool = True,
-) -> list[ReadPair]:
+) -> dict[str, str]:
     """
     Deduplicate a list of read pairs from a single library.
 
@@ -328,10 +327,10 @@ def deduplicate_read_pairs(
         verbose: Print some debug info
 
     Returns:
-        Same list with exemplar_id field populated for each read
+        Dict mapping read_id to exemplar_id
     """
     if len(read_pairs) == 0:
-        return read_pairs
+        return {}
 
     # Step 1: Build equivalence graph
     buckets = _assign_to_buckets(read_pairs, minimizer_params, dedup_params.orientation)
@@ -345,14 +344,15 @@ def deduplicate_read_pairs(
     del buckets
 
     # Step 2: Find connected components and assign exemplars
+    exemplar_mapping = {}
     for component in nx.connected_components(graph):
         component_list = list(component)
         cluster = {idx: read_pairs[idx] for idx in component_list}
         exemplar_id = _select_exemplar_by_centrality(cluster, graph)
 
-        # Mark all reads in cluster with their exemplar
-        for rp in cluster.values():
-            rp.exemplar_id = exemplar_id
+        # Record exemplar for all reads in cluster
+        for idx in component_list:
+            exemplar_mapping[read_pairs[idx].read_id] = exemplar_id
 
     if verbose:
         n_components = nx.number_connected_components(graph)
@@ -362,7 +362,7 @@ def deduplicate_read_pairs(
             f"{comparisons} comparisons, {n_edges} edges, {n_components} components"
         )
 
-    return read_pairs
+    return exemplar_mapping
 
 
 ##
@@ -489,6 +489,7 @@ def deduplicate_read_pairs_streaming(
     read_pairs,  # Iterable of ReadPair objects
     dedup_params: DedupParams = DedupParams(),
     minimizer_params: MinimizerParams = MinimizerParams(),
+    verbose: bool = False,
 ) -> dict[str, str]:
     """
     Deduplicate read pairs using a streaming single-pass algorithm.
@@ -503,6 +504,7 @@ def deduplicate_read_pairs_streaming(
         read_pairs: Iterable of ReadPair objects to deduplicate
         dedup_params: Parameters controlling deduplication behavior
         minimizer_params: Parameters for minimizer extraction
+        verbose: Print some debug info
 
     Returns:
         Dict mapping read_id to exemplar_id
@@ -571,5 +573,12 @@ def deduplicate_read_pairs_streaming(
         # Look up the final best leader for this cluster
         final_exemplar_id = cluster_leaders[initial_exemplar_id].best_read_id
         final_mapping[read_id] = final_exemplar_id
+
+    if verbose:
+        n_reads = len(final_mapping)
+        n_clusters = len(cluster_leaders)
+        print(
+            f"Deduplication: {n_reads} reads, {n_clusters} clusters"
+        )
 
     return final_mapping

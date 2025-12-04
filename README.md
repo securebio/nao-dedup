@@ -66,12 +66,12 @@ read_pairs = [
 ]
 
 # Run deduplication
-result = deduplicate_read_pairs(read_pairs)
+exemplar_mapping = deduplicate_read_pairs(read_pairs)
 # Or deduplicate_read_pairs_streaming(read_pairs) for large datasets.
 
 # Check results
-for rp in result:
-    print(f"{rp.read_id} -> exemplar: {rp.exemplar_id}")
+for read_id, exemplar_id in exemplar_mapping.items():
+    print(f"{read_id} -> exemplar: {exemplar_id}")
 ```
 
 ### Advanced Configuration
