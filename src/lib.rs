@@ -66,6 +66,9 @@ impl ReadPair {
             .map(|b| (b - 33) as u32)
             .sum();
         let count = (self.fwd_qual.len() + self.rev_qual.len()) as f64;
+        if count == 0.0 {
+            return 0.0;
+        }
         total as f64 / count
     }
 }
