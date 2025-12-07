@@ -64,12 +64,19 @@ impl ReadPair {
 // Minimizer Extraction
 // ============================================================================
 
-fn compute_kmer_hash(seq: &[u8], kmer_len: usize) -> u64 {
-    let mut hash: u64 = 0;
-    for &base in &seq[..kmer_len] {
-        hash = hash.wrapping_mul(31).wrapping_add(base as u64);
+/// Encode a single base to 2-bit value: A=0, C=1, G=2, T=3
+///
+/// Returns None for non-ACGT bases (N, etc.), which causes the rolling hash to
+/// reset, ensuring k-mers with ambiguous bases won't be selected as minimizers.
+#[inline(always)]
+fn encode_base(b: u8) -> Option<u64> {
+    match b {
+        b'A' | b'a' => Some(0),
+        b'C' | b'c' => Some(1),
+        b'G' | b'g' => Some(2),
+        b'T' | b't' => Some(3),
+        _ => None,
     }
-    hash
 }
 
 fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
@@ -79,6 +86,14 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
     if seq_len < params.kmer_len {
         return vec![];
     }
+
+    assert!(params.kmer_len <= 32, "k-mer length must be <= 32 for 2-bit encoding");
+
+    let mask: u64 = if params.kmer_len == 32 {
+        u64::MAX
+    } else {
+        (1u64 << (2 * params.kmer_len)) - 1
+    };
 
     let mut minimizers = Vec::with_capacity(params.num_windows);
     let step = if params.num_windows > 1 {
@@ -96,9 +111,27 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
         }
 
         let mut min_hash = u64::MAX;
-        for pos in window_start..=(window_end - params.kmer_len) {
-            let hash = compute_kmer_hash(&seq_bytes[pos..], params.kmer_len);
-            min_hash = min_hash.min(hash);
+
+        // Rolling hash state
+        let mut hash: u64 = 0;
+        let mut valid_len: usize = 0; // how many valid A/C/G/T bases in current run
+
+        for pos in window_start..window_end {
+            if let Some(v) = encode_base(seq_bytes[pos]) {
+                hash = ((hash << 2) | v) & mask;
+                if valid_len < params.kmer_len {
+                    valid_len += 1;
+                }
+
+                if valid_len == params.kmer_len {
+                    // we have a full-length k-mer ending at `pos`
+                    min_hash = min_hash.min(hash);
+                }
+            } else {
+                // Non-ACGT base: reset to skip k-mers containing ambiguous bases
+                hash = 0;
+                valid_len = 0;
+            }
         }
 
         if min_hash != u64::MAX {

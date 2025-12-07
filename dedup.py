@@ -11,7 +11,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field, InitVar
 from itertools import combinations
 from typing import Literal, Optional
-from zlib import crc32
 
 import networkx as nx
 
@@ -19,7 +18,7 @@ import networkx as nx
 # - Don't need any Bio machinery
 # - Python string operations are faster than the corresponding Seq operations
 
-EMPTY_KMER_SENTINEL_HASH = -1  # crc32 returns nonnegative integers, no collision
+EMPTY_KMER_SENTINEL_HASH = -1  # k-mer encoding returns nonnegative integers, no collision
 HashPair = tuple[int, int]  # hash from fwd mate, hash from rev mate
 
 ORIENT_STRICT = "strict"
@@ -104,9 +103,25 @@ def _canonical_kmer(kmer: str) -> str:
 
 
 def _hash_kmer(kmer: str) -> int:
-    """Hash a kmer to an int. The actual hash used is an implementation detail,
-    but the result must be stable run-to-run (so no default Python hash)."""
-    return crc32(kmer.encode())
+    """Hash a kmer to an int using 2-bit encoding (A=0, C=1, G=2, T=3).
+
+    K-mers with non-ACGT bases (N, etc.) return the maximum possible hash value,
+    ensuring they won't be selected as minimizers.
+    """
+    x = 0
+    for b in kmer:
+        if b in 'Aa':
+            v = 0
+        elif b in 'Cc':
+            v = 1
+        elif b in 'Gg':
+            v = 2
+        elif b in 'Tt':
+            v = 3
+        else:
+            return 2**64 - 1  # max hash; won't be selected as minimizer
+        x = (x << 2) | v
+    return x
 
 
 def _extract_minimizer(seq: str, window_idx: int, params: MinimizerParams) -> int:
@@ -133,11 +148,10 @@ def _extract_minimizer(seq: str, window_idx: int, params: MinimizerParams) -> in
     min_hash = bigger_than_hash
     for i in range(start, end - params.kmer_len + 1):
         kmer = seq[i : i + params.kmer_len]
-        if "N" not in kmer:  # Skip k-mers with ambiguous bases
-            canonical = _canonical_kmer(kmer)
-            h = _hash_kmer(canonical)
-            if h < min_hash:
-                min_hash = h
+        canonical = _canonical_kmer(kmer)
+        h = _hash_kmer(canonical)
+        if h < min_hash:
+            min_hash = h
 
     return min_hash if min_hash != bigger_than_hash else EMPTY_KMER_SENTINEL_HASH
 

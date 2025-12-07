@@ -203,6 +203,19 @@ Each read is divided into windows, and the lexicographically smallest k-mer
 (minimizer) is extracted from each window. This creates a signature for each
 read pair.
 
+#### K-mer Hashing
+
+K-mers are hashed using a 2-bit DNA encoding (A=0, C=1, G=2, T=3) that encodes
+each base into exactly 2 bits. This provides several advantages:
+
+- **Fast**: Just bit shifts and ORs, much faster than CRC32 or polynomial hashing
+- **No collisions**: Bijective mapping for k-mers up to length 32 (fits in 64 bits)
+- **Consistent**: Python and Rust implementations produce identical hash values
+- **DNA-aware**: Leverages the 4-base structure of DNA sequences
+
+K-mers containing non-ACGT bases (primarily N) return a sentinel value,
+ensuring they won't be selected as minimizers.
+
 ### 2. Bucketing
 
 Read pairs with matching minimizers are assigned to the same buckets. This
@@ -288,6 +301,13 @@ Run all tests (Python and Rust implementations):
 pytest
 ```
 
-To ensure the Python and Rust implementations of streaming dedup stay in sync,
-tests are parametrized by implementation.  The Rust library is built
-automatically when tests are run if not already present.
+To ensure the Python and Rust implementations stay in sync, tests include:
+
+- **Implementation parity tests**: Parametrized tests that run on both
+  streaming implementations to ensure they produce identical results for all
+  scenarios including edge cases with N's, offsets, and errors
+- **End-to-end tests**: Verify deduplication works correctly on realistic data
+  with various read configurations and quality scores
+
+The Rust library is built automatically when tests are run if not already
+present.
