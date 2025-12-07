@@ -168,42 +168,33 @@ fn check_similarity(
     let s1 = seq1.as_bytes();
     let s2 = seq2.as_bytes();
 
-    // Try different offsets
-    for offset in 0..=max_offset {
-        // Try s1 ahead of s2
-        if offset < s1.len() {
-            let overlap_len = s1.len().min(s2.len() + offset) - offset;
-            if overlap_len > 0 {
-                let mismatches = s1[offset..offset + overlap_len]
-                    .iter()
-                    .zip(&s2[..overlap_len])
-                    .filter(|(&a, &b)| a != b)
-                    .count();
-
-                // Offset counts as errors
-                let total_errors = mismatches + offset;
-                if (total_errors as f64) / (overlap_len as f64) <= max_error_frac {
-                    return true;
-                }
-            }
+    let check_one_way = |seqa: &[u8], seqb: &[u8], off: usize| -> bool {
+        if off >= seqa.len() {
+            return false;
+        }
+        let overlap_len = (seqa.len() - off).min(seqb.len());
+        if overlap_len == 0 {
+            return false;
         }
 
-        // Try s2 ahead of s1
-        if offset > 0 && offset < s2.len() {
-            let overlap_len = s2.len().min(s1.len() + offset) - offset;
-            if overlap_len > 0 {
-                let mismatches = s2[offset..offset + overlap_len]
-                    .iter()
-                    .zip(&s1[..overlap_len])
-                    .filter(|(&a, &b)| a != b)
-                    .count();
+        let mismatches = seqa[off..off + overlap_len]
+            .iter()
+            .zip(&seqb[..overlap_len])
+            .filter(|(&a, &b)| a != b)
+            .count();
 
-                // Offset counts as errors
-                let total_errors = mismatches + offset;
-                if (total_errors as f64) / (overlap_len as f64) <= max_error_frac {
-                    return true;
-                }
-            }
+        let total_errors = mismatches + off;
+        (total_errors as f64) / (overlap_len as f64) <= max_error_frac
+    };
+
+    for offset in 0..=max_offset {
+        // Check with s1 shifted left relative to s2
+        if check_one_way(s1, s2, offset) {
+            return true;
+        }
+        // Check with s2 shifted left relative to s1 (equivalent to s1 shifted right)
+        if offset > 0 && check_one_way(s2, s1, offset) {
+            return true;
         }
     }
 
