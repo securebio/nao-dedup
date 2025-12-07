@@ -5,6 +5,11 @@ use std::collections::HashMap;
 // Configuration Parameters
 // ============================================================================
 
+/// Parameters for deduplication matching.
+///
+/// Note: for simplicity, the Rust implementation always uses tolerant
+/// orientation matching (allows swapped mate pairs). Unlike the Python
+/// implementation, there is no strict orientation mode.
 #[derive(Debug, Clone)]
 pub struct DedupParams {
     pub max_offset: usize,
@@ -197,6 +202,12 @@ fn check_similarity(
     false
 }
 
+/// Check if two read pairs are similar enough to be considered duplicates.
+///
+/// Always checks both standard orientation (Fwd-Fwd, Rev-Rev) and swapped
+/// orientation (Fwd-Rev, Rev-Fwd). This matches Python's ORIENT_TOLERANT mode.
+/// Unlike the Python implementation, the Rust version does not support strict
+/// orientation mode.
 fn reads_are_similar(
     rp1: &ReadPair,
     rp2: &ReadPair,
@@ -209,8 +220,7 @@ fn reads_are_similar(
         return true;
     }
 
-    // 2. Tolerant/Swapped Orientation (Fwd-Rev, Rev-Fwd)
-    // Matches Python's ORIENT_TOLERANT
+    // 2. Swapped Orientation (Fwd-Rev, Rev-Fwd)
     if check_similarity(&rp1.fwd_seq, &rp2.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
         && check_similarity(&rp1.rev_seq, &rp2.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
     {

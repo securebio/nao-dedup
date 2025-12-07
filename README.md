@@ -29,8 +29,9 @@ doing, in part because our team is overall much stronger working in Python.
   against every other pair
 - **Quality-based selection**: Selects the highest quality read as the exemplar
   for each duplicate cluster
-- **Flexible orientation handling**: Can operate in strict mode (same
-  orientation required) or tolerant mode (handles mate-pair swaps)
+- **Flexible orientation handling** (Python only): Can operate in strict mode
+  (same orientation required) or tolerant mode (handles mate-pair swaps). Rust
+  always uses tolerant mode.
 - **High performance**: Rust implementation is ~40x faster than Python, and
   uses much less memory.
 
@@ -131,6 +132,8 @@ result = deduplicate_read_pairs(
 - **Memory Efficient**: Only stores exemplar reads, not entire dataset
 - **Scalable**: Handles millions of reads efficiently
 - **Quality-Aware**: Uses sequence quality scores for exemplar selection
+- **Tolerant Orientation Only**: Always allows swapped mate pairs (no strict
+  orientation mode)
 
 ### API Overview
 
@@ -227,7 +230,8 @@ Within each bucket, read pairs are compared to determine if they're
 duplicates. Comparison allows for:
 - Small alignment offsets (configurable via `max_offset`)
 - Sequencing errors (configurable via `max_error_frac`)
-- Optional mate-pair orientation swaps (configurable via `orientation`)
+- Mate-pair orientation swaps (always enabled in Rust; configurable via
+  `orientation` in Python)
 
 ### 4. Clustering (Python graph-based) or Streaming (Rust and Python streaming)
 
