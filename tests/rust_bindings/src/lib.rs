@@ -18,7 +18,7 @@ fn py_to_rust_read_pair(py_rp: &Bound<'_, PyAny>) -> PyResult<ReadPair> {
     // Python ReadPair stores mean_q but not individual quality strings
     // Generate dummy quality strings that match the mean quality
     let mean_q: f64 = py_rp.getattr("mean_q")?.extract()?;
-    let qual_char = ((mean_q as u32) + 33) as u8 as char;
+    let qual_char = ((mean_q.round() as u32) + 33) as u8 as char;
     let fwd_qual = qual_char.to_string().repeat(fwd_seq.len());
     let rev_qual = qual_char.to_string().repeat(rev_seq.len());
 
