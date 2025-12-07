@@ -244,8 +244,6 @@ fn reads_are_similar(
 
 #[derive(Debug, Clone)]
 struct ClusterStats {
-    #[allow(dead_code)]
-    key: String,           // Immutable: initial exemplar ID (used as hash key)
     best_read_id: String,  // Mutable: current best read ID
     best_score: f64,
     count: usize,
@@ -339,7 +337,6 @@ impl DedupContext {
             self.clusters.insert(
                 read_id.clone(),
                 ClusterStats {
-                    key: read_id.clone(),
                     best_read_id: read_id.clone(),
                     best_score: mean_q,
                     count: 1,
