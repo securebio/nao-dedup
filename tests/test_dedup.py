@@ -628,7 +628,7 @@ class TestPythonAndRustDeduplication:
             assert mapping[read_id] == read_id
 
     def test_approximate_match_parity(self, dedup_func):
-        """Ensure C and Python handle mismatches identically."""
+        """Ensure Rust and Python handle mismatches identically."""
         seq = "A" * 100
         seq_error = "A" * 50 + "T" + "A" * 49  # 1 mismatch (1% error)
 
@@ -645,7 +645,7 @@ class TestPythonAndRustDeduplication:
         assert mapping["r1"] == mapping["r2"]
 
     def test_approximate_match_threshold(self, dedup_func):
-        """Ensure C and Python reject matches above error threshold."""
+        """Ensure Rust and Python reject matches above error threshold."""
         seq = "A" * 100
         seq_error = "A" * 97 + "TTT"  # 3 mismatches (3% error)
 
