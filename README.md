@@ -122,6 +122,10 @@ result = deduplicate_read_pairs(
 - `window_len` (default: 25): Size of each window in base pairs
 - `kmer_len` (default: 7): Size of k-mers for minimizer calculation
 
+**Note**: Rust uses different defaults (`kmer_len=15`, `num_windows=4`) because
+it's expected to handle much larger inputs where more selective minimizers
+reduce memory usage and comparisons.
+
 ---
 
 ## Rust Implementation

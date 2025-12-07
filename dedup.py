@@ -38,7 +38,12 @@ class DedupParams:
 
 @dataclass
 class MinimizerParams:
-    """Minimizer configuration (rarely needs changing)."""
+    """Minimizer configuration (rarely needs changing).
+
+    Note: These defaults (kmer_len=7, num_windows=3) differ from Rust
+    (kmer_len=15, num_windows=4) because Rust is expected to handle much larger
+    inputs where more selective minimizers reduce memory usage and comparisons.
+    """
 
     num_windows: int = 3  # Number of windows per read
     window_len: int = 25  # Base pairs per window

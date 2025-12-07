@@ -25,6 +25,11 @@ impl Default for DedupParams {
     }
 }
 
+/// Parameters for minimizer extraction.
+///
+/// Note: The Rust defaults (kmer_len=15, num_windows=4) differ from Python
+/// (kmer_len=7, num_windows=3) because Rust is expected to handle much larger
+/// inputs where more selective minimizers reduce memory usage and comparisons.
 #[derive(Debug, Clone)]
 pub struct MinimizerParams {
     pub kmer_len: usize,
