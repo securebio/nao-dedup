@@ -575,7 +575,7 @@ implementation_ids = ["python-streaming", "rust"]
 @pytest.mark.parametrize(
     "dedup_func",
     implementations,
-    ids=implementations
+    ids=implementation_ids
 )
 class TestPythonAndRustDeduplication:
     """Tests that run on Python and Rust implementations."""
