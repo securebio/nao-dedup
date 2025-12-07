@@ -424,6 +424,6 @@ pub fn deduplicate_read_pairs(
     // Finalize
     ctx.finalize();
 
-    // Return the results (already built during processing)
-    ctx.results.clone()
+    // Return the results by moving them out (ctx is dropped here anyway)
+    ctx.results
 }
