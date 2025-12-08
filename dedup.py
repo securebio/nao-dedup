@@ -11,7 +11,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field, InitVar
 from itertools import combinations
 from typing import Literal, Optional
-from zlib import crc32
 
 import networkx as nx
 
@@ -19,7 +18,7 @@ import networkx as nx
 # - Don't need any Bio machinery
 # - Python string operations are faster than the corresponding Seq operations
 
-EMPTY_KMER_SENTINEL_HASH = -1  # crc32 returns nonnegative integers, no collision
+EMPTY_KMER_SENTINEL_HASH = -1  # k-mer encoding returns nonnegative integers, no collision
 HashPair = tuple[int, int]  # hash from fwd mate, hash from rev mate
 
 ORIENT_STRICT = "strict"
@@ -39,7 +38,12 @@ class DedupParams:
 
 @dataclass
 class MinimizerParams:
-    """Minimizer configuration (rarely needs changing)."""
+    """Minimizer configuration (rarely needs changing).
+
+    Note: These defaults (kmer_len=7, num_windows=3) differ from Rust
+    (kmer_len=15, num_windows=4) because Rust is expected to handle much larger
+    inputs where more selective minimizers reduce memory usage and comparisons.
+    """
 
     num_windows: int = 3  # Number of windows per read
     window_len: int = 25  # Base pairs per window
@@ -104,9 +108,25 @@ def _canonical_kmer(kmer: str) -> str:
 
 
 def _hash_kmer(kmer: str) -> int:
-    """Hash a kmer to an int. The actual hash used is an implementation detail,
-    but the result must be stable run-to-run (so no default Python hash)."""
-    return crc32(kmer.encode())
+    """Hash a kmer to an int using 2-bit encoding (A=0, C=1, G=2, T=3).
+
+    K-mers with non-ACGT bases (N, etc.) return the maximum possible hash value,
+    ensuring they won't be selected as minimizers.
+    """
+    x = 0
+    for b in kmer:
+        if b in 'Aa':
+            v = 0
+        elif b in 'Cc':
+            v = 1
+        elif b in 'Gg':
+            v = 2
+        elif b in 'Tt':
+            v = 3
+        else:
+            return 2**64 - 1  # max hash; won't be selected as minimizer
+        x = (x << 2) | v
+    return x
 
 
 def _extract_minimizer(seq: str, window_idx: int, params: MinimizerParams) -> int:
@@ -133,11 +153,10 @@ def _extract_minimizer(seq: str, window_idx: int, params: MinimizerParams) -> in
     min_hash = bigger_than_hash
     for i in range(start, end - params.kmer_len + 1):
         kmer = seq[i : i + params.kmer_len]
-        if "N" not in kmer:  # Skip k-mers with ambiguous bases
-            canonical = _canonical_kmer(kmer)
-            h = _hash_kmer(canonical)
-            if h < min_hash:
-                min_hash = h
+        canonical = _canonical_kmer(kmer)
+        h = _hash_kmer(canonical)
+        if h < min_hash:
+            min_hash = h
 
     return min_hash if min_hash != bigger_than_hash else EMPTY_KMER_SENTINEL_HASH
 
@@ -504,7 +523,7 @@ def deduplicate_read_pairs_streaming(
         read_pairs: Iterable of ReadPair objects to deduplicate
         dedup_params: Parameters controlling deduplication behavior
         minimizer_params: Parameters for minimizer extraction
-        verbose: Print some debug info
+        verbose: If True, print statistics about deduplication
 
     Returns:
         Dict mapping read_id to exemplar_id
@@ -577,8 +596,6 @@ def deduplicate_read_pairs_streaming(
     if verbose:
         n_reads = len(final_mapping)
         n_clusters = len(cluster_leaders)
-        print(
-            f"Deduplication: {n_reads} reads, {n_clusters} clusters"
-        )
+        print(f"Streaming dedup: {n_reads} reads -> {n_clusters} clusters")
 
     return final_mapping
