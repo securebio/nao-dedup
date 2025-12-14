@@ -420,9 +420,6 @@ class TestParameterValidation:
         assert params2.orientation == ORIENT_TOLERANT
 
 
-def _get_exemplar_mapping(result):
-    """Helper to get exemplar mapping (both algorithms now return dict)."""
-    return result
 
 
 # ============================================================================
@@ -467,14 +464,12 @@ class TestDeduplication:
     """End-to-end tests for all deduplication implementations."""
 
     def test_empty_input(self, dedup_func):
-        result = dedup_func([], verbose=False)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func([], verbose=False)
         assert mapping == {}
 
     def test_single_read(self, dedup_func):
         rp = ReadPair("read1", "AAAA", "TTTT", "IIII", "IIII")
-        result = dedup_func([rp], verbose=False)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func([rp], verbose=False)
         assert mapping == {"read1": "read1"}
 
     def test_identical_reads(self, dedup_func):
@@ -489,8 +484,7 @@ class TestDeduplication:
             ReadPair("read3", seq_f, seq_r, qual, qual),
         ]
 
-        result = dedup_func(read_pairs, verbose=False)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func(read_pairs, verbose=False)
 
         # All should map to same exemplar
         exemplars = set(mapping.values())
@@ -506,8 +500,7 @@ class TestDeduplication:
             ReadPair("read3", _random_seq(100, rng), _random_seq(100, rng), qual, qual),
         ]
 
-        result = dedup_func(read_pairs, verbose=False)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func(read_pairs, verbose=False)
 
         # Each should be its own exemplar
         for read_id in mapping:
@@ -531,8 +524,7 @@ class TestDeduplication:
             ReadPair("read5", seq3_f, seq3_r, "I" * 100, "I" * 100),  # Cluster 2
         ]
 
-        result = dedup_func(read_pairs, verbose=False)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func(read_pairs, verbose=False)
 
         exemplars = set(mapping.values())
         assert len(exemplars) == 3
@@ -568,8 +560,7 @@ class TestDeduplication:
         ]
 
         dedup_params = DedupParams(max_offset=1, max_error_frac=0.01)
-        result = dedup_func(read_pairs, dedup_params, verbose=False)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func(read_pairs, dedup_params, verbose=False)
 
         exemplar1 = mapping["read1"]
         assert mapping["read2"] == exemplar1
@@ -591,8 +582,7 @@ class TestDeduplication:
 
         # Explicit params to allow the error
         params = DedupParams(max_error_frac=0.02)
-        result = dedup_func([rp1, rp2], dedup_params=params)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func([rp1, rp2], dedup_params=params)
 
         # Should be clustered together
         assert mapping["r1"] == mapping["r2"]
@@ -607,8 +597,7 @@ class TestDeduplication:
 
         # With 2% threshold, should NOT match
         params = DedupParams(max_error_frac=0.02)
-        result = dedup_func([rp1, rp2], dedup_params=params)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func([rp1, rp2], dedup_params=params)
 
         # Should be separate clusters
         assert mapping["r1"] != mapping["r2"]
@@ -631,8 +620,7 @@ class TestDeduplication:
         # With max_offset=1, these should match
         # Overlap is 99 bases, offset counts as 1 error, so 1/99 ≈ 0.0101 (1.01% error)
         params = DedupParams(max_offset=1, max_error_frac=0.02)
-        result = dedup_func([rp1, rp2], dedup_params=params)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func([rp1, rp2], dedup_params=params)
 
         # Should be clustered together
         assert mapping["r1"] == mapping["r2"]
@@ -652,8 +640,7 @@ class TestDeduplication:
 
         # With max_offset=1, these should match
         params = DedupParams(max_offset=1, max_error_frac=0.02)
-        result = dedup_func([rp1, rp2], dedup_params=params)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func([rp1, rp2], dedup_params=params)
 
         # Should be clustered together
         assert mapping["r1"] == mapping["r2"]
@@ -673,8 +660,7 @@ class TestDeduplication:
         rp2 = ReadPair("r2", seq2_fwd, seq2_rev, "I"*98, "I"*98)
 
         params = DedupParams(max_offset=1, max_error_frac=0.01)
-        result = dedup_func([rp1, rp2], dedup_params=params)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func([rp1, rp2], dedup_params=params)
 
         # Should be separate clusters
         assert mapping["r1"] == "r1"
@@ -694,8 +680,7 @@ class TestDeduplication:
         # Offset=-1: overlap=199, offset counts as 1, total = 1/199 ≈ 0.00503
         # Should NOT match (0.00503 > 0.004)
         params = DedupParams(max_offset=1, max_error_frac=0.004)
-        result = dedup_func([rp1, rp2], dedup_params=params)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func([rp1, rp2], dedup_params=params)
 
         # Should be separate clusters
         assert mapping["r1"] == "r1"
@@ -704,7 +689,7 @@ class TestDeduplication:
         # But with 0.006 threshold, should match  (0.00503 <= 0.006)
         params2 = DedupParams(max_offset=1, max_error_frac=0.006)
         result2 = dedup_func([rp1, rp2], dedup_params=params2)
-        mapping2 = _get_exemplar_mapping(result2)
+        mapping2 = result2
 
         # Should be clustered together
         assert mapping2["r1"] == mapping2["r2"]
@@ -739,8 +724,7 @@ class TestDeduplication:
 
         # Process in order A, B, C
         read_pairs = [rpA, rpB, rpC]
-        result = dedup_func(read_pairs, verbose=False)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func(read_pairs, verbose=False)
 
         # All three should map to the same cluster
         exemplars = set(mapping.values())
@@ -769,8 +753,7 @@ class TestDeduplication:
             ReadPair("read5", seq, seq, "(" * 150, "(" * 150),  # Q=7
         ]
 
-        result = dedup_func(read_pairs, verbose=False)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func(read_pairs, verbose=False)
 
         # All should map to the same cluster
         exemplars = set(mapping.values())
@@ -798,8 +781,7 @@ class TestDeduplication:
         rp1 = ReadPair("r1", seq_with_ns, seq_with_ns, "I" * 150, "I" * 150)
         rp2 = ReadPair("r2", seq_with_ns, seq_with_ns, "I" * 150, "I" * 150)
 
-        result = dedup_func([rp1, rp2], verbose=False)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func([rp1, rp2], verbose=False)
 
         # Should be clustered together despite N windows
         assert mapping["r1"] == mapping["r2"], \
@@ -824,8 +806,7 @@ class TestDeduplication:
         normal_seq = "A" * 150
         rp3 = ReadPair("r3", normal_seq, normal_seq, "I" * 150, "I" * 150)
 
-        result = dedup_func([rp1, rp2, rp3], verbose=False)
-        mapping = _get_exemplar_mapping(result)
+        mapping = dedup_func([rp1, rp2, rp3], verbose=False)
 
         # r3 should always be its own cluster
         assert mapping["r3"] == "r3"
