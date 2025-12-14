@@ -210,10 +210,11 @@ Each read is divided into windows, and the lexicographically smallest k-mer
 (minimizer) is extracted from each window. This creates a signature for each
 read pair.
 
-#### K-mer Hashing
+#### K-mer Encodingg
 
-K-mers are hashed using a 2-bit DNA encoding (A=0, C=1, G=2, T=3) that encodes
-each base into exactly 2 bits. This provides several advantages:
+K-mers are encoded using a 2-bit DNA encoding (A=0, C=1, G=2, T=3) that
+represents each base with exactly 2 bits. This provides several advantages when
+used as a hash key:
 
 - **Fast**: Just bit shifts and ORs, much faster than CRC32 or polynomial hashing
 - **No collisions**: Bijective mapping for k-mers up to length 32 (fits in 64 bits)
