@@ -279,7 +279,7 @@ On Linux:
 # Ubuntu/Debian
 sudo apt install rustc cargo
 
-# Fedora
+# Redhat derived distributions (Fedora, Amazon Linux 2023, etc)
 sudo dnf install rust cargo
 ```
 
