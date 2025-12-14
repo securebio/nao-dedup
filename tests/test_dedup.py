@@ -36,6 +36,10 @@ def _random_seq(length: int, rng: random.Random) -> str:
     return "".join(rng.choices(["A", "C", "G", "T"], k=length))
 
 
+# ============================================================================
+# Python-Only Tests (Helper Functions, Graph Operations, etc.)
+# ============================================================================
+
 class TestHelperFunctions:
     """Test sequence manipulation helper functions."""
 
