@@ -112,6 +112,13 @@ def _hash_kmer(kmer: str) -> int:
 
     K-mers with non-ACGT bases (N, etc.) return the maximum possible hash value,
     ensuring they won't be selected as minimizers.
+
+    To make the Rust code fast we use a custom hash there, and then we use it
+    here as well because we're keeping Python and Rust in sync.  This is fine
+    for streaming (where we'll use Rust where speed counts) but likely slows
+    down the graph algorithm relative to using a crc32 or some other fast hash
+    that Python has a C implementation for.  If the graph version ends up too
+    slow, consider switching to crc32 just for Python's graph version.
     """
     x = 0
     for b in kmer:
