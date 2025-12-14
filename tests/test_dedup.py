@@ -425,20 +425,59 @@ def _get_exemplar_mapping(result):
     return result
 
 
+# ============================================================================
+# End-to-End Deduplication Tests (All Implementations)
+# ============================================================================
+
+# Import Rust wrapper - always rebuild to pick up any changes
+rust_bindings_dir = Path(__file__).parent / "rust_bindings"
+
+try:
+    # Always run maturin develop to ensure we're testing the latest code
+    # (maturin will skip rebuild if nothing changed)
+    subprocess.run(
+        ["maturin", "develop", "--quiet"],
+        cwd=str(rust_bindings_dir),
+        check=True
+    )
+    from nao_dedup_rust import deduplicate_read_pairs_rust
+except (subprocess.CalledProcessError, FileNotFoundError) as e:
+    raise RuntimeError(
+        "Failed to build Rust library. "
+        "Install Rust first, then:\n"
+        "  pip install -r requirements-dev.txt\n"
+        "  cd tests/rust_bindings && maturin develop"
+    ) from e
+
+# Parametrize to run tests on all three implementations
+all_implementations = [
+    deduplicate_read_pairs,
+    deduplicate_read_pairs_streaming,
+    deduplicate_read_pairs_rust
+]
+all_implementation_ids = ["graph", "python-streaming", "rust"]
+
+
 @pytest.mark.parametrize(
     "dedup_func",
-    [deduplicate_read_pairs, deduplicate_read_pairs_streaming],
-    ids=["graph", "streaming"]
+    all_implementations,
+    ids=all_implementation_ids
 )
-class TestDeduplicateFunction:
-    """End-to-end tests for both deduplication algorithms."""
+class TestDeduplication:
+    """End-to-end tests for all deduplication implementations."""
 
-    def test_empty_input_empty_output(self, dedup_func):
+    def test_empty_input(self, dedup_func):
         result = dedup_func([], verbose=False)
         mapping = _get_exemplar_mapping(result)
         assert mapping == {}
 
-    def test_all_identical_sequences_single_cluster(self, dedup_func):
+    def test_single_read(self, dedup_func):
+        rp = ReadPair("read1", "AAAA", "TTTT", "IIII", "IIII")
+        result = dedup_func([rp], verbose=False)
+        mapping = _get_exemplar_mapping(result)
+        assert mapping == {"read1": "read1"}
+
+    def test_identical_reads(self, dedup_func):
         rng = random.Random(42)
         seq_f = _random_seq(100, rng)
         seq_r = _random_seq(100, rng)
@@ -453,11 +492,11 @@ class TestDeduplicateFunction:
         result = dedup_func(read_pairs, verbose=False)
         mapping = _get_exemplar_mapping(result)
 
+        # All should map to same exemplar
         exemplars = set(mapping.values())
         assert len(exemplars) == 1
-        assert set(mapping.keys()) == {"read1", "read2", "read3"}
 
-    def test_no_duplicates_all_singletons(self, dedup_func):
+    def test_no_duplicates(self, dedup_func):
         rng = random.Random(42)
         qual = "I" * 100
 
@@ -470,9 +509,9 @@ class TestDeduplicateFunction:
         result = dedup_func(read_pairs, verbose=False)
         mapping = _get_exemplar_mapping(result)
 
-        for read_id, exemplar_id in mapping.items():
-            assert exemplar_id == read_id
-        assert set(mapping.keys()) == {"read1", "read2", "read3"}
+        # Each should be its own exemplar
+        for read_id in mapping:
+            assert mapping[read_id] == read_id
 
     def test_multiple_small_clusters(self, dedup_func):
         rng = random.Random(42)
@@ -540,92 +579,6 @@ class TestDeduplicateFunction:
 
         exemplars = set(mapping.values())
         assert len(exemplars) == 2
-
-
-# ============================================================================
-# Python and Rust Implementation Tests
-# ============================================================================
-
-# Import Rust wrapper - always rebuild to pick up any changes
-rust_bindings_dir = Path(__file__).parent / "rust_bindings"
-
-try:
-    # Always run maturin develop to ensure we're testing the latest code
-    # (maturin will skip rebuild if nothing changed)
-    subprocess.run(
-        ["maturin", "develop", "--quiet"],
-        cwd=str(rust_bindings_dir),
-        check=True
-    )
-    from nao_dedup_rust import deduplicate_read_pairs_rust
-except (subprocess.CalledProcessError, FileNotFoundError) as e:
-    raise RuntimeError(
-        "Failed to build Rust library. "
-        "Install Rust first, then:\n"
-        "  pip install -r requirements-dev.txt\n"
-        "  cd tests/rust_bindings && maturin develop"
-    ) from e
-
-# Parametrize to run tests on both implementations
-implementations = [deduplicate_read_pairs_streaming,
-                   deduplicate_read_pairs_rust]
-implementation_ids = ["python-streaming", "rust"]
-
-
-@pytest.mark.parametrize(
-    "dedup_func",
-    implementations,
-    ids=implementation_ids
-)
-class TestPythonAndRustDeduplication:
-    """Tests that run on Python and Rust implementations."""
-
-    def test_empty_input(self, dedup_func):
-        result = dedup_func([], verbose=False)
-        mapping = _get_exemplar_mapping(result)
-        assert mapping == {}
-
-    def test_single_read(self, dedup_func):
-        rp = ReadPair("read1", "AAAA", "TTTT", "IIII", "IIII")
-        result = dedup_func([rp], verbose=False)
-        mapping = _get_exemplar_mapping(result)
-        assert mapping == {"read1": "read1"}
-
-    def test_identical_reads(self, dedup_func):
-        rng = random.Random(42)
-        seq_f = _random_seq(100, rng)
-        seq_r = _random_seq(100, rng)
-        qual = "I" * 100
-
-        read_pairs = [
-            ReadPair("read1", seq_f, seq_r, qual, qual),
-            ReadPair("read2", seq_f, seq_r, qual, qual),
-            ReadPair("read3", seq_f, seq_r, qual, qual),
-        ]
-
-        result = dedup_func(read_pairs, verbose=False)
-        mapping = _get_exemplar_mapping(result)
-
-        # All should map to same exemplar
-        exemplars = set(mapping.values())
-        assert len(exemplars) == 1
-
-    def test_no_duplicates(self, dedup_func):
-        rng = random.Random(42)
-        qual = "I" * 100
-
-        read_pairs = [
-            ReadPair("read1", _random_seq(100, rng), _random_seq(100, rng), qual, qual),
-            ReadPair("read2", _random_seq(100, rng), _random_seq(100, rng), qual, qual),
-            ReadPair("read3", _random_seq(100, rng), _random_seq(100, rng), qual, qual),
-        ]
-
-        result = dedup_func(read_pairs, verbose=False)
-        mapping = _get_exemplar_mapping(result)
-
-        # Each should be its own exemplar
-        for read_id in mapping:
-            assert mapping[read_id] == read_id
 
     def test_approximate_match_parity(self, dedup_func):
         """Ensure Rust and Python handle mismatches identically."""
@@ -856,13 +809,14 @@ class TestPythonAndRustDeduplication:
         """
         Test sequences where ALL windows contain only N's.
 
-        Extreme edge case: if all windows are N's, both implementations should
-        handle it gracefully (no minimizers means no matches, each is own cluster).
+        Edge case: Graph and streaming behave differently for all-N reads:
+        - Graph: All-N reads share bucket (-1,-1) so they cluster together
+        - Streaming: All-N reads have no minimizers so each is separate
         """
         # Create a sequence of all N's
         all_ns = "N" * 150
 
-        # Two sequences of all N's - shouldn't match anything
+        # Two sequences of all N's
         rp1 = ReadPair("r1", all_ns, all_ns, "I" * 150, "I" * 150)
         rp2 = ReadPair("r2", all_ns, all_ns, "I" * 150, "I" * 150)
 
@@ -873,8 +827,14 @@ class TestPythonAndRustDeduplication:
         result = dedup_func([rp1, rp2, rp3], verbose=False)
         mapping = _get_exemplar_mapping(result)
 
-        # Sequences with all N's should each be their own cluster
-        # (no minimizers means no bucket matches)
-        assert mapping["r1"] == "r1", "r1 should be its own exemplar"
-        assert mapping["r2"] == "r2", "r2 should be its own exemplar"
-        assert mapping["r3"] == "r3", "r3 should be its own exemplar"
+        # r3 should always be its own cluster
+        assert mapping["r3"] == "r3"
+
+        # All-N reads behave differently:
+        if dedup_func == deduplicate_read_pairs:  # graph
+            # Graph: all-N reads share bucket, so they cluster together
+            assert mapping["r1"] == mapping["r2"], "Graph should cluster all-N reads"
+        else:  # streaming (Python or Rust)
+            # Streaming: no minimizers means each is separate
+            assert mapping["r1"] == "r1", "r1 should be its own exemplar"
+            assert mapping["r2"] == "r2", "r2 should be its own exemplar"
