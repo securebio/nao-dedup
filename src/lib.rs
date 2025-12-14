@@ -37,6 +37,29 @@ pub struct MinimizerParams {
     pub num_windows: usize,
 }
 
+impl MinimizerParams {
+    /// Create new MinimizerParams with validation.
+    pub fn new(kmer_len: usize, window_len: usize, num_windows: usize) -> Result<Self, String> {
+        if kmer_len > 32 {
+            return Err(format!(
+                "k-mer length must be <= 32 for 2-bit encoding (fits in 64 bits), got {}",
+                kmer_len
+            ));
+        }
+        if kmer_len > window_len {
+            return Err(format!(
+                "kmer_len ({}) must be <= window_len ({})",
+                kmer_len, window_len
+            ));
+        }
+        Ok(Self {
+            kmer_len,
+            window_len,
+            num_windows,
+        })
+    }
+}
+
 impl Default for MinimizerParams {
     fn default() -> Self {
         Self {
@@ -100,8 +123,7 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
         return vec![];
     }
 
-    assert!(params.kmer_len <= 32, "k-mer length must be <= 32 for 2-bit encoding");
-
+    // kmer_len is validated in MinimizerParams::new() to be <= 32
     let mask: u64 = if params.kmer_len == 32 {
         u64::MAX
     } else {

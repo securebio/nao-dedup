@@ -64,11 +64,10 @@ fn deduplicate_read_pairs_rust(
         let kmer_len: usize = params.getattr("kmer_len")?.extract()?;
         let window_len: usize = params.getattr("window_len")?.extract()?;
         let num_windows: usize = params.getattr("num_windows")?.extract()?;
-        Some(MinimizerParams {
-            kmer_len,
-            window_len,
-            num_windows,
-        })
+        Some(
+            MinimizerParams::new(kmer_len, window_len, num_windows)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?
+        )
     } else {
         None
     };
