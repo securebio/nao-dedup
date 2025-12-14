@@ -113,6 +113,10 @@ def _hash_kmer(kmer: str) -> int:
     K-mers with non-ACGT bases (N, etc.) return the maximum possible hash value,
     ensuring they won't be selected as minimizers.
 
+    This particular implementation is bit-packing which is very technically not
+    a hash since its invertable (assuming all ACTG).  But that just makes it a
+    very good hash function for our purposes!
+
     To make the Rust code fast we use a custom hash there, and then we use it
     here as well because we're keeping Python and Rust in sync.  This is fine
     for streaming (where we'll use Rust where speed counts) but likely slows

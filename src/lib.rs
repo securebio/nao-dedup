@@ -129,6 +129,9 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
         let mut hash: u64 = 0;
         let mut valid_len: usize = 0; // how many valid A/C/G/T bases in current run
 
+        // We're using bit packing to make the "hashes" for our minimizers,
+        // which is technically not hashing since its invertable.  But that
+        // just makes it a very good hash function for our purposes!
         for pos in window_start..window_end {
             if let Some(v) = encode_base(seq_bytes[pos]) {
                 hash = ((hash << 2) | v) & mask;
