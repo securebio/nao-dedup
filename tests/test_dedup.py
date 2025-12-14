@@ -561,7 +561,7 @@ try:
 except (subprocess.CalledProcessError, FileNotFoundError) as e:
     raise RuntimeError(
         "Failed to build Rust library. "
-        "Install Rust first (brew install rust), then:\n"
+        "Install Rust first, then:\n"
         "  pip install -r requirements-dev.txt\n"
         "  cd tests/rust_bindings && maturin develop"
     ) from e
