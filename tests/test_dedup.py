@@ -760,17 +760,17 @@ class TestPythonAndRustDeduplication:
         """
         Test that cluster lookups work correctly after the best_read_id is updated.
 
-        This test triggers a bug where the cluster hash table uses the initial
-        exemplar ID as its key, but lookups incorrectly compare against best_read_id,
-        which can change during processing.
+        This is a regression test for a bug where the cluster hash table uses the
+        initial exemplar ID as its key, but lookups incorrectly compared against
+        best_read_id, which can change during processing.
 
         Scenario:
         1. Read A (low quality) creates cluster keyed by "readA"
         2. Read B (high quality) matches A, updates best_read_id to "readB"
         3. Read C (low quality) matches A, should find the same cluster
 
-        Bug behavior: Step 3 fails to find the cluster because it hashes "readA"
-        but compares against best_read_id "readB", creating a duplicate cluster.
+        The bug caused step 3 to fail because it hashed "readA" but compared
+        against best_read_id "readB", creating a duplicate cluster instead.
         """
         # Create three identical sequences but with different quality scores
         seq = "A" * 150
