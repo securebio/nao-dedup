@@ -180,7 +180,7 @@ fn check_similarity(
         let mismatches = seqa[off..off + overlap_len]
             .iter()
             .zip(&seqb[..overlap_len])
-            .filter(|(&a, &b)| a != b)
+            .filter(|(a, b)| *a != *b)
             .count();
 
         let total_errors = mismatches + off;
