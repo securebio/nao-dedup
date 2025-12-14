@@ -826,3 +826,55 @@ class TestPythonAndRustDeduplication:
         # All should map to read3 (highest quality)
         for read_id in ["read1", "read2", "read3", "read4", "read5"]:
             assert mapping[read_id] == "read3", f"{read_id} mapped to {mapping[read_id]}, expected read3"
+
+    def test_windows_with_all_ns(self, dedup_func):
+        """
+        Test that sequences with windows containing all N's are handled correctly.
+
+        Edge case: When a window has all N's (or enough N's that no valid k-mer
+        can be formed), Python's _extract_minimizer returns EMPTY_KMER_SENTINEL_HASH
+        while Rust's extract_minimizers skips the window (doesn't add to vector).
+        Both should produce the same clustering behavior.
+        """
+        # With default params: num_windows=3/4, window_len=25
+        # Create sequences where middle window is all N's
+        # Format: [good bases][all N's][good bases]
+        seq_with_ns = "A" * 30 + "N" * 30 + "C" * 90
+
+        # Two identical sequences with N windows
+        rp1 = ReadPair("r1", seq_with_ns, seq_with_ns, "I" * 150, "I" * 150)
+        rp2 = ReadPair("r2", seq_with_ns, seq_with_ns, "I" * 150, "I" * 150)
+
+        result = dedup_func([rp1, rp2], verbose=False)
+        mapping = _get_exemplar_mapping(result)
+
+        # Should be clustered together despite N windows
+        assert mapping["r1"] == mapping["r2"], \
+            f"Sequences with N windows not clustered: r1->{mapping['r1']}, r2->{mapping['r2']}"
+
+    def test_all_windows_ns(self, dedup_func):
+        """
+        Test sequences where ALL windows contain only N's.
+
+        Extreme edge case: if all windows are N's, both implementations should
+        handle it gracefully (no minimizers means no matches, each is own cluster).
+        """
+        # Create a sequence of all N's
+        all_ns = "N" * 150
+
+        # Two sequences of all N's - shouldn't match anything
+        rp1 = ReadPair("r1", all_ns, all_ns, "I" * 150, "I" * 150)
+        rp2 = ReadPair("r2", all_ns, all_ns, "I" * 150, "I" * 150)
+
+        # Also add a normal sequence
+        normal_seq = "A" * 150
+        rp3 = ReadPair("r3", normal_seq, normal_seq, "I" * 150, "I" * 150)
+
+        result = dedup_func([rp1, rp2, rp3], verbose=False)
+        mapping = _get_exemplar_mapping(result)
+
+        # Sequences with all N's should each be their own cluster
+        # (no minimizers means no bucket matches)
+        assert mapping["r1"] == "r1", "r1 should be its own exemplar"
+        assert mapping["r2"] == "r2", "r2 should be its own exemplar"
+        assert mapping["r3"] == "r3", "r3 should be its own exemplar"
