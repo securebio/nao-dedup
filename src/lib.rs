@@ -98,12 +98,15 @@ impl ReadPair {
 
 // ============================================================================
 // Minimizer Extraction
+//
+// Strategy: Use 2-bit encoding (A=0,C=1,G=2,T=3) to pack k-mers into u64.
+// This allows fast rolling hash computation and comparison.
+//
+// For canonical k-mers: we maintain both forward and reverse-complement hashes
+// simultaneously, then take min(fwd, rc) at each position. This is much faster
+// than computing RC as a string and comparing lexicographically.
 // ============================================================================
 
-/// Encode a single base to 2-bit value: A=0, C=1, G=2, T=3
-///
-/// Returns None for non-ACGT bases (N, etc.), which causes the rolling hash to
-/// reset, ensuring k-mers with ambiguous bases won't be selected as minimizers.
 #[inline(always)]
 fn encode_base(b: u8) -> Option<u64> {
     match b {
@@ -111,15 +114,13 @@ fn encode_base(b: u8) -> Option<u64> {
         b'C' | b'c' => Some(1),
         b'G' | b'g' => Some(2),
         b'T' | b't' => Some(3),
-        _ => None,
+        _ => None,  // N and other ambiguous bases: skip this k-mer
     }
 }
 
-/// Get complement of a base as 2-bit encoded value
 #[inline(always)]
 fn complement_encoded(encoded: u64) -> u64 {
-    // A(0) <-> T(3), C(1) <-> G(2)
-    3 - encoded
+    3 - encoded  // A(0) <-> T(3), C(1) <-> G(2)
 }
 
 /// Compute reverse complement of a DNA sequence
@@ -136,6 +137,11 @@ fn reverse_complement(seq: &str) -> String {
         .collect()
 }
 
+/// Extract one minimizer per window from a sequence.
+///
+/// Uses rolling hash to efficiently compute canonical k-mers (min of forward/RC).
+/// Windows are adjacent starting from position 0, focusing on the most reliable
+/// portion of the read (quality typically degrades toward the end).
 fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
     let seq_bytes = seq.as_bytes();
     let seq_len = seq_bytes.len();
@@ -144,7 +150,7 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
         return vec![];
     }
 
-    // kmer_len is validated in MinimizerParams::new() to be <= 32
+    // Mask to keep only the rightmost k*2 bits (each base uses 2 bits)
     let mask: u64 = if params.kmer_len == 32 {
         u64::MAX
     } else {
@@ -154,7 +160,8 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
     let mut minimizers = Vec::with_capacity(params.num_windows);
 
     // Use adjacent windows starting from the beginning of the read
-    // This matches Python's strategy: window i covers [i*window_len, (i+1)*window_len]
+    // This matches Python's strategy: window i covers
+    // [i*window_len, (i+1)*window_len]
     for i in 0..params.num_windows {
         let window_start = i * params.window_len;
 
@@ -171,20 +178,22 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
 
         let mut min_hash = u64::MAX;
 
-        // Rolling hash state for both forward and reverse complement
+        // Maintain rolling hashes for both forward and reverse-complement
+        // This avoids string operations for RC computation
         let mut hash_fwd: u64 = 0;
         let mut hash_rc: u64 = 0;
-        let mut valid_len: usize = 0; // number of consecutive valid ACGT bases
+        let mut valid_len: usize = 0;  // number of consecutive valid ACGT bases
 
         // We're using bit packing to make the "hashes" for our minimizers,
-        // which is technically not hashing since it's invertible.  But that
+        // which is technically not hashing since it's invertible. But that
         // just makes it a very good hash function for our purposes!
         for pos in window_start..window_end {
             if let Some(encoded) = encode_base(seq_bytes[pos]) {
                 // Update forward hash: shift left, add new base
                 hash_fwd = ((hash_fwd << 2) | encoded) & mask;
 
-                // Update reverse complement hash: shift right, add complement at left
+                // Update reverse complement hash: shift right, add complement
+                // at left
                 let complement = complement_encoded(encoded);
                 hash_rc = (hash_rc >> 2) | (complement << (2 * (params.kmer_len - 1)));
 
@@ -213,6 +222,9 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
 
 // ============================================================================
 // Similarity Checking
+//
+// Allow sequences to match with small alignment shifts (indels) and mismatches.
+// The offset counts as error: e.g., 1bp offset + 1 mismatch = 2 errors total.
 // ============================================================================
 
 fn check_similarity(
@@ -224,6 +236,7 @@ fn check_similarity(
     let s1 = seq1.as_bytes();
     let s2 = seq2.as_bytes();
 
+    // Closure to check one alignment direction
     let check_one_way = |seqa: &[u8], seqb: &[u8], off: usize| -> bool {
         if off >= seqa.len() {
             return false;
@@ -248,7 +261,8 @@ fn check_similarity(
         if check_one_way(s1, s2, offset) {
             return true;
         }
-        // Check with s2 shifted left relative to s1 (equivalent to s1 shifted right)
+        // Check with s2 shifted left relative to s1 (equivalent to s1 shifted
+        // right)
         if offset > 0 && check_one_way(s2, s1, offset) {
             return true;
         }
@@ -257,16 +271,14 @@ fn check_similarity(
     false
 }
 
-/// Check if two read pairs are similar enough to be considered duplicates.
+/// Check if two read pairs are similar enough to be duplicates.
 ///
-/// Checks two orientations:
+/// Checks two orientations (matching Python's ORIENT_TOLERANT mode):
 /// 1. Standard: (Fwd, Rev) vs (Fwd, Rev)
 /// 2. RC-Swapped: (Fwd, Rev) vs (RC(Rev), RC(Fwd))
-///    This represents the same DNA fragment sequenced from the opposite strand
 ///
-/// This matches Python's ORIENT_TOLERANT mode.
-/// Unlike the Python implementation, the Rust version does not support strict
-/// orientation mode.
+/// The RC-swapped check handles the same DNA fragment sequenced from the opposite
+/// strand. Note: Rust version always uses tolerant mode (no strict mode option).
 fn reads_are_similar(
     rp1: &ReadPair,
     rp2: &ReadPair,
@@ -294,43 +306,47 @@ fn reads_are_similar(
 }
 
 // ============================================================================
-// Cluster Stats
+// Deduplication Context
+//
+// Streaming algorithm: processes reads one at a time, storing only unique
+// sequences (exemplars) rather than all reads. Memory usage scales with
+// unique sequences, not total input size.
+//
+// Key invariant: Each cluster is identified by the read_id of its FIRST member
+// (the initial exemplar). As we see better reads, we update best_read_id in
+// ClusterStats, but the cluster key remains unchanged. This is crucial for
+// lookups to work correctly.
 // ============================================================================
 
 #[derive(Debug, Clone)]
 struct ClusterStats {
-    best_read_id: String,  // Mutable: current best read ID
+    best_read_id: String,  // Can change as we see better reads
     best_score: f64,
     count: usize,
 }
-
-// ============================================================================
-// Deduplication Context
-// ============================================================================
 
 pub struct DedupContext {
     dedup_params: DedupParams,
     minimizer_params: MinimizerParams,
 
-    // We use FxHashMap for buckets because it's super fast, but requires
-    // well-distributed keys, which we do have in this case.  We use AHashMap
-    // otherwise, because it's much faster than std::collections::HashMap
-    // (we don't need the standard HashMap's cryptographic protections) but
-    // doesn't require well-distributed keys).
+    // HashMap choices:
+    // - FxHashMap for minimizer buckets: u64 keys are well-distributed
+    //   integers, so we can use the ultra-fast FxHash (just a multiply + XOR)
+    // - AHashMap for String keys: much faster than std HashMap (which uses
+    //   cryptographic SipHash), and we don't need DOS protection
 
-    // Minimizer buckets: minimizer -> list of exemplar IDs
+    // minimizer -> list of exemplar IDs
     buckets: FxHashMap<u64, Vec<String>>,
 
-    // Exemplar storage: Only store ReadPair data for exemplars
+    // exemplarID -> read content
     exemplar_store: AHashMap<String, ReadPair>,
 
-    // Result mapping: read_id -> exemplar_id (grows linearly with total reads)
+    // read_id -> exemplar_id (grows linearly with total reads)
     results: AHashMap<String, String>,
 
-    // Cluster stats: initial_exemplar_id -> ClusterStats
+    // initial_exemplar_id -> ClusterStats
     clusters: AHashMap<String, ClusterStats>,
 
-    // Finalized flag
     finalized: bool,
 }
 
@@ -347,15 +363,20 @@ impl DedupContext {
         }
     }
 
+    /// Process one read pair. Returns the exemplar ID it was assigned to.
+    ///
+    /// Algorithm:
+    /// 1. Extract minimizers and look up matching exemplars in buckets
+    /// 2. Compare this read against candidates until we find a match
+    /// 3a. If match found: add to existing cluster, potentially updating best_read_id
+    /// 3b. If no match: create new cluster with this read as initial exemplar
     pub fn process_read(&mut self, read_pair: ReadPair) -> String {
         let read_id = read_pair.read_id.clone();
         let mean_q = read_pair.mean_quality();
 
-        // Extract minimizers from both forward and reverse
         let fwd_mins = extract_minimizers(&read_pair.fwd_seq, &self.minimizer_params);
         let rev_mins = extract_minimizers(&read_pair.rev_seq, &self.minimizer_params);
 
-        // Combine minimizers
         let mut all_mins = fwd_mins;
         all_mins.extend(rev_mins);
 
@@ -365,11 +386,8 @@ impl DedupContext {
         'outer: for &min_hash in &all_mins {
             if let Some(bucket_reads) = self.buckets.get(&min_hash) {
                 for candidate_id in bucket_reads {
-                    // Look up candidate in exemplar_store (not all reads)
                     if let Some(candidate) = self.exemplar_store.get(candidate_id) {
-                        // Check if reads are similar
                         if reads_are_similar(&read_pair, candidate, &self.dedup_params) {
-                            // Get the exemplar for this candidate
                             let candidate_exemplar = self.results.get(candidate_id)
                                 .cloned()
                                 .unwrap_or_else(|| candidate_id.clone());
@@ -415,27 +433,26 @@ impl DedupContext {
             read_id.clone()
         };
 
-        // Record the result mapping
         self.results.insert(read_id.clone(), exemplar_id.clone());
 
         exemplar_id
     }
 
+    /// Finalize results: resolve all reads to their cluster's best_read_id.
+    ///
+    /// During streaming, reads point to the cluster key (first exemplar).
+    /// After finalization, they point to the best exemplar found for that cluster.
     pub fn finalize(&mut self) {
-        // Resolve exemplars to cluster best reads
         let mut final_results = AHashMap::new();
 
         for read_id in self.results.keys() {
-            // Get the cluster this read was assigned to
             let cluster_key = self.results.get(read_id)
                 .cloned()
                 .unwrap_or_else(|| read_id.clone());
 
-            // Get the best read from that cluster
             let final_exemplar = if let Some(cluster) = self.clusters.get(&cluster_key) {
                 cluster.best_read_id.clone()
             } else {
-                // No cluster found, use the key itself
                 cluster_key
             };
 
@@ -445,7 +462,6 @@ impl DedupContext {
         self.results = final_results;
         self.finalized = true;
 
-        // Clear buckets and exemplar store to free memory (no longer needed)
         self.buckets.clear();
         self.exemplar_store.clear();
     }
@@ -477,14 +493,11 @@ pub fn deduplicate_read_pairs(
 
     let mut ctx = DedupContext::new(dedup_params, minimizer_params);
 
-    // Process all reads
     for rp in read_pairs {
         ctx.process_read(rp);
     }
 
-    // Finalize
     ctx.finalize();
 
-    // Return the results by moving them out (ctx is dropped here anyway)
     ctx.results
 }
