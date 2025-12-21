@@ -263,15 +263,13 @@ def _read_pairs_equivalent(rp1: ReadPair, rp2: ReadPair, params: DedupParams) ->
     ):
         return True
 
-    # In tolerant mode, check RC-swapped orientation
+    # In tolerant mode, check swapped orientation
     if params.orientation == ORIENT_TOLERANT:
-        # RC-swapped orientation: (fwd, rev) matches (RC(rev), RC(fwd))
-        # This represents the same DNA fragment sequenced from the opposite strand
-        rp2_fwd_rc = _reverse_complement(rp2.fwd_seq)
-        rp2_rev_rc = _reverse_complement(rp2.rev_seq)
-
-        if _sequences_match(rp1.fwd_seq, rp2_rev_rc, params) and _sequences_match(
-            rp1.rev_seq, rp2_fwd_rc, params
+        # Swapped orientation: (fwd, rev) matches (rev, fwd)
+        # This handles the case where adapters attached in the opposite orientation,
+        # causing the same DNA fragment to be sequenced with forward/reverse swapped
+        if _sequences_match(rp1.fwd_seq, rp2.rev_seq, params) and _sequences_match(
+            rp1.rev_seq, rp2.fwd_seq, params
         ):
             return True
 
@@ -513,15 +511,12 @@ def _find_matching_exemplar(
                     _sequences_match(rp.rev_seq, exemplar.rev_seq, dedup_params)):
                     return exemplar.read_id
 
-                # In tolerant mode, check RC-swapped orientation
+                # In tolerant mode, check swapped orientation
                 if dedup_params.orientation == ORIENT_TOLERANT:
-                    # RC-swapped orientation: (fwd, rev) matches (RC(rev), RC(fwd))
-                    # This represents the same DNA fragment sequenced from the opposite strand
-                    exemplar_fwd_rc = _reverse_complement(exemplar.fwd_seq)
-                    exemplar_rev_rc = _reverse_complement(exemplar.rev_seq)
-
-                    if (_sequences_match(rp.fwd_seq, exemplar_rev_rc, dedup_params) and
-                        _sequences_match(rp.rev_seq, exemplar_fwd_rc, dedup_params)):
+                    # Swapped orientation: (fwd, rev) matches (rev, fwd)
+                    # This handles the case where adapters attached in the opposite orientation
+                    if (_sequences_match(rp.fwd_seq, exemplar.rev_seq, dedup_params) and
+                        _sequences_match(rp.rev_seq, exemplar.fwd_seq, dedup_params)):
                         return exemplar.read_id
 
     return None

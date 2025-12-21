@@ -841,47 +841,57 @@ class TestDeduplication:
             assert mapping["r1"] == "r1", "r1 should be its own exemplar"
             assert mapping["r2"] == "r2", "r2 should be its own exemplar"
 
-    def test_reverse_complement_deduplication(self, dedup_func):
+    def test_adapter_orientation_swapped_deduplication(self, dedup_func):
         """
-        Verify that a sequence and its reverse complement are considered duplicates.
+        Verify that the same DNA fragment with adapters in opposite orientations
+        is correctly identified as a duplicate.
 
-        This test verifies that the deduplication logic identifies the same
-        molecule sequenced from opposite strands as duplicates.
+        When adapters attach to a double-stranded insert in opposite orientations,
+        we get reads that are swapped but NOT reverse complemented:
 
-        RP1: (SeqA, SeqB)
-        RP2: (RC(SeqB), RC(SeqA)) - RC-swapped orientation
+        Orientation alpha (P5 on top strand):
+            Forward read: beginning of top strand
+            Reverse read: beginning of bottom strand (reported as-is by sequencer)
 
-        When sequencing the same DNA fragment from the opposite strand:
-        - What was forward becomes RC(reverse)
-        - What was reverse becomes RC(forward)
+        Orientation beta (P5 on bottom strand):
+            Forward read: beginning of bottom strand
+            Reverse read: beginning of top strand (reported as-is by sequencer)
 
-        The implementation uses canonical k-mers for bucketing (so they will be
-        compared) and checks RC-swapped orientation during similarity matching.
+        This means: (F_alpha, R_alpha) should match (R_beta, F_beta)
+        with NO reverse complement needed.
+
+        Example with GATTACA insert (using longer sequences for realistic minimizers):
         """
-        # Create non-palindromic sequences
-        seq_a = "AAAAAAAAAA" + "CCCCCCCCCC" + "GGGGGGGGGG" + "AAAAAAAAAA"
-        seq_b = "TTTTTTTTTT" + "GGGGGGGGGG" + "CCCCCCCCCC" + "TTTTTTTTTT"
+        # Create a 150bp "insert" - this represents the actual DNA fragment
+        # Use a pattern that's clearly directional (not palindromic)
+        insert_top = "GATTACA" * 20 + "ACATAG" * 5  # 150bp total
+        insert_bottom = _reverse_complement(insert_top)
 
-        seq_a_rc = _reverse_complement(seq_a)
-        seq_b_rc = _reverse_complement(seq_b)
+        qual = "I" * 150
 
-        # Verify they are actually different strings
-        assert seq_a != seq_a_rc
+        # Orientation alpha: P5 attached to top strand
+        # Forward reads from top strand, reverse reads from bottom strand
+        fwd_alpha = insert_top
+        rev_alpha = insert_bottom
 
-        qual = "I" * 40
+        # Orientation beta: P5 attached to bottom strand (insert rotated 180°)
+        # Forward reads from bottom strand, reverse reads from top strand
+        fwd_beta = insert_bottom
+        rev_beta = insert_top
 
-        # RP1: Original orientation
-        rp1 = ReadPair("r1", seq_a, seq_b, qual, qual)
+        rp1 = ReadPair("r1", fwd_alpha, rev_alpha, qual, qual)
+        rp2 = ReadPair("r2", fwd_beta, rev_beta, qual, qual)
 
-        # RP2: Same DNA fragment sequenced from opposite strand
-        # Forward becomes RC(reverse), reverse becomes RC(forward)
-        rp2 = ReadPair("r2", seq_b_rc, seq_a_rc, qual, qual)
+        # Verify they're actually swapped (not identical)
+        assert fwd_alpha == rev_beta
+        assert rev_alpha == fwd_beta
+        assert fwd_alpha != fwd_beta  # Different orientations
 
         mapping = dedup_func([rp1, rp2], verbose=False)
 
-        # Assertion: They should be clustered together
+        # They should be detected as duplicates (tolerant mode)
         assert mapping["r1"] == mapping["r2"], \
-            f"Reverse complement sequences not deduplicated. " \
+            f"Adapter-swapped orientations not deduplicated. " \
             f"R1: {mapping['r1']}, R2: {mapping['r2']}"
 
     def test_windowing_strategy_beginning_of_read(self, dedup_func):

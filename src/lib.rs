@@ -123,20 +123,6 @@ fn complement_encoded(encoded: u64) -> u64 {
     3 - encoded  // A(0) <-> T(3), C(1) <-> G(2)
 }
 
-/// Compute reverse complement of a DNA sequence
-fn reverse_complement(seq: &str) -> String {
-    seq.bytes()
-        .rev()
-        .map(|b| match b {
-            b'A' | b'a' => 'T',
-            b'C' | b'c' => 'G',
-            b'G' | b'g' => 'C',
-            b'T' | b't' => 'A',
-            _ => 'N',  // Non-ACGT bases become N
-        })
-        .collect()
-}
-
 /// Extract one minimizer per window from a sequence.
 ///
 /// Uses rolling hash to efficiently compute canonical k-mers (min of forward/RC).
@@ -275,29 +261,24 @@ fn check_similarity(
 ///
 /// Checks two orientations (matching Python's ORIENT_TOLERANT mode):
 /// 1. Standard: (Fwd, Rev) vs (Fwd, Rev)
-/// 2. RC-Swapped: (Fwd, Rev) vs (RC(Rev), RC(Fwd))
+/// 2. Swapped: (Fwd, Rev) vs (Rev, Fwd)
 ///
-/// The RC-swapped check handles the same DNA fragment sequenced from the opposite
-/// strand. Note: Rust version always uses tolerant mode (no strict mode option).
+/// The swapped check handles the case where adapters attached in the opposite
+/// orientation, causing the same DNA fragment to be sequenced with forward/reverse
+/// swapped. Note: Rust version always uses tolerant mode (no strict mode option).
 fn reads_are_similar(
     rp1: &ReadPair,
     rp2: &ReadPair,
     dedup_params: &DedupParams,
 ) -> bool {
-    // 1. Standard Orientation (Fwd-Fwd, Rev-Rev)
     if check_similarity(&rp1.fwd_seq, &rp2.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
         && check_similarity(&rp1.rev_seq, &rp2.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
     {
         return true;
     }
 
-    // 2. RC-Swapped Orientation: (Fwd, Rev) matches (RC(Rev), RC(Fwd))
-    // This represents the same DNA fragment sequenced from the opposite strand
-    let rp2_fwd_rc = reverse_complement(&rp2.fwd_seq);
-    let rp2_rev_rc = reverse_complement(&rp2.rev_seq);
-
-    if check_similarity(&rp1.fwd_seq, &rp2_rev_rc, dedup_params.max_offset, dedup_params.max_error_frac)
-        && check_similarity(&rp1.rev_seq, &rp2_fwd_rc, dedup_params.max_offset, dedup_params.max_error_frac)
+    if check_similarity(&rp1.fwd_seq, &rp2.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
+        && check_similarity(&rp1.rev_seq, &rp2.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
     {
         return true;
     }
