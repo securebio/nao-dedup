@@ -1,10 +1,10 @@
-# nao_dedup
+# nao-dedup
 
 Sequencing read deduplication with error-tolerant matching
 
 ## Overview
 
-`nao_dedup` identifies and removes duplicate read pairs from sequencing data
+`nao-dedup` identifies and removes duplicate read pairs from sequencing data
 while being tolerant of small alignment shifts and sequencing errors. It uses
 minimizer-based bucketing for efficiency to avoid comparing every read pair
 against every other pair.
@@ -52,6 +52,23 @@ pip install -r requirements.txt
 ```
 
 ### Usage
+
+#### Choosing an Algorithm
+
+The Python implementation of `nao-dedup` provides two deduplication algorithms:
+
+1. **`deduplicate_read_pairs()`** - Graph-based algorithm
+   - **Best for**: Small to medium datasets (< 100k reads)
+   - **Advantages**: Uses graph centrality to select optimal exemplars
+   - **Memory usage**: Stores all reads in memory (~3GB for 250k reads)
+
+2. **`deduplicate_read_pairs_streaming()`** - Streaming two-pass algorithm
+   - **Best for**: Large datasets (> 100k reads)
+   - **Advantages**: Only stores unique sequences in memory (~2-3x less memory
+     in the typical case, far more on pathological datasets)
+   - **Memory usage**: Much lower (~1GB for 250k reads with 75k unique)
+   - **Quality**: Still selects high-quality representatives based on length
+     and quality
 
 #### Basic Example
 
@@ -113,8 +130,8 @@ result = deduplicate_read_pairs(
   still be considered a duplicate
 - `max_error_frac` (default: 0.01): Maximum fraction of mismatches allowed
   (errors/overlap length)
-- `orientation` (default: "tolerant"): Either `ORIENT_STRICT` (F-R must match
-  F-R) or `ORIENT_TOLERANT` (also allows F-R to match R-F)
+- `orientation` (default: `ORIENT_TOLERANT`): Either `ORIENT_STRICT` (F-R must
+  match F-R) or `ORIENT_TOLERANT` (also allows F-R to match R-F)
 
 #### MinimizerParams
 
@@ -193,6 +210,10 @@ integrate this library with TSV file I/O.
 
 We balance memory and speed, storing only exemplar reads rather than the entire
 dataset.
+
+Note that this is single-threaded performance.  We ought to be able to do even
+better with more cores, though in practice we just mark duplicates on multiple
+files in parallel.
 
 ### Building
 
