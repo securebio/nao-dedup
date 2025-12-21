@@ -161,7 +161,7 @@ reduce memory usage and comparisons.
 The Rust library is designed as a stateful context that processes reads in two
 passes:
 
-#### Pass 1: Build Index
+#### Pass 1: Process Reads
 
 ```rust
 use nao_dedup::{DedupContext, DedupParams, MinimizerParams, ReadPair};
@@ -180,12 +180,16 @@ let read_pair = ReadPair {
     rev_qual: "IIIIIIII".to_string(),
 };
 ctx.process_read(read_pair);
+```
 
+#### Pass 2: Finalize
+
+```rust
 // Finalize to build final exemplar mappings
 ctx.finalize();
 ```
 
-#### Pass 2: Query Results
+#### Query Results
 
 ```rust
 // After finalization, query final exemplars
@@ -231,7 +235,7 @@ Each read is divided into windows, and the lexicographically smallest k-mer
 (minimizer) is extracted from each window. This creates a signature for each
 read pair.
 
-#### K-mer Encodingg
+#### K-mer Encoding
 
 K-mers are encoded using a 2-bit DNA encoding (A=0, C=1, G=2, T=3) that
 represents each base with exactly 2 bits. This provides several advantages when
@@ -245,10 +249,38 @@ used as a hash key:
 K-mers containing non-ACGT bases (primarily N) return a sentinel value,
 ensuring they won't be selected as minimizers.
 
+#### Window Placement
+
+Windows are placed adjacently starting from the beginning of each read (positions 0, window_len, 2×window_len, etc.). This strategy:
+- Aligns with standard NGS duplicate detection based on 5' mapping coordinates
+- Focuses on the most stable region of reads (the beginning)
+- Avoids the tail region, which is most likely to be trimmed or contain sequencing errors
+
+For example, with 3 windows of 25bp on a 150bp read:
+- Window 0: positions [0-25]
+- Window 1: positions [25-50]
+- Window 2: positions [50-75]
+- Positions 75-150 are not examined for minimizers
+
 ### 2. Bucketing
 
 Read pairs with matching minimizers are assigned to the same buckets. This
 dramatically reduces the number of pairwise comparisons needed.
+
+**Python graph-based**:
+- All reads are assigned to buckets up front using tuple keys `(fwd_hash, rev_hash)`
+- Generates n² bucket keys per read (all combinations of forward and reverse minimizers)
+- Each read appears in multiple buckets
+- More precise bucketing with fewer collisions
+- Stores all reads in memory
+
+**Rust and Python streaming**:
+- Reads are processed one at a time
+- Uses individual minimizer hashes as keys (not tuples)
+- Generates 2n keys per read (just the minimizers from forward and reverse reads)
+- Simpler bucketing trades precision for memory efficiency
+- More bucket collisions are acceptable since full sequence comparison happens anyway
+- Only stores unique exemplars, not all reads
 
 ### 3. Pairwise Comparison
 
@@ -259,7 +291,7 @@ duplicates. Comparison allows for:
 - Mate-pair orientation swaps (always enabled in Rust; configurable via
   `orientation` in Python)
 
-### 4. Clustering (Python graph-based) or Streaming (Rust and Python streaming)
+### 4. Clustering
 
 **Python graph-based**:
 - An equivalence graph is built where nodes are read pairs and edges connect
@@ -270,9 +302,11 @@ duplicates. Comparison allows for:
 
 **Rust and Python streaming**:
 - No graph construction - purely streaming approach
-- First matching read in a bucket becomes the cluster exemplar
-- Subsequent matches are assigned to that exemplar
-- Two-pass algorithm: Pass 1 builds index, Pass 2 queries final exemplars
+- First read in a cluster identifies that cluster (becomes the cluster ID)
+- As reads are processed, the best read (by quality and length) becomes the exemplar
+- Subsequent reads matching the cluster are compared against the current exemplar
+- If a better read is found, it replaces the previous exemplar
+- Two-pass algorithm: Pass 1 processes reads and builds index, Pass 2 finalizes exemplar mappings
 
 ### 5. Exemplar Selection
 
@@ -283,8 +317,9 @@ duplicates. Comparison allows for:
 4. Read ID (lexicographic tie-breaker)
 
 **Rust/Python streaming** selects based on:
-1. First match in bucket (becomes exemplar)
-2. Quality score for tie-breaking when applicable
+1. Mean quality score (higher is better)
+2. Total read length (longer is better)
+3. First read in cluster serves as tie-breaker
 
 ## Development Setup
 

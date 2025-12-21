@@ -872,8 +872,8 @@ class TestDeduplication:
         """
         Verify that a sequence and its reverse complement are considered duplicates.
 
-        This test verifies that the deduplication logic identifies the same DNA molecule
-        sequenced from opposite strands as duplicates.
+        This test verifies that the deduplication logic identifies the same
+        molecule sequenced from opposite strands as duplicates.
 
         RP1: (SeqA, SeqB)
         RP2: (RC(SeqB), RC(SeqA)) - RC-swapped orientation
@@ -882,11 +882,11 @@ class TestDeduplication:
         - What was forward becomes RC(reverse)
         - What was reverse becomes RC(forward)
 
-        The implementation uses canonical k-mers for bucketing (so they will be compared)
-        and checks RC-swapped orientation during similarity matching.
+        The implementation uses canonical k-mers for bucketing (so they will be
+        compared) and checks RC-swapped orientation during similarity matching.
         """
         # Create non-palindromic sequences
-        seq_a = "AAAAAAAAAA" + "CCCCCCCCCC" + "GGGGGGGGGG" + "AAAAAAAAAA"  # Non-palindromic
+        seq_a = "AAAAAAAAAA" + "CCCCCCCCCC" + "GGGGGGGGGG" + "AAAAAAAAAA"
         seq_b = "TTTTTTTTTT" + "GGGGGGGGGG" + "CCCCCCCCCC" + "TTTTTTTTTT"
 
         seq_a_rc = _reverse_complement(seq_a)
@@ -910,3 +910,56 @@ class TestDeduplication:
         assert mapping["r1"] == mapping["r2"], \
             f"Reverse complement sequences not deduplicated. " \
             f"R1: {mapping['r1']}, R2: {mapping['r2']}"
+
+    def test_windowing_strategy_beginning_of_read(self, dedup_func):
+        """
+        Verify that windowing strategy anchors to the beginning of the read.
+
+        Both implementations use adjacent windows starting from position 0,
+        focusing on the most stable region of the read (since quality drops off
+        as you get farther into a read, so more trimming is likely.
+
+        With num_windows=3, window_len=25 on 150bp reads:
+        Windows: [0-25], [25-50], [50-75]
+
+        Case 1: Similarity only in the tail [75-150] → miss
+        Case 2: Similarity in window 1 [25-50] → detect
+        """
+        # Use parameters that allow 9 mismatches in 150bp (6% error)
+        m_params = MinimizerParams(num_windows=3, window_len=25, kmer_len=7)
+        d_params = DedupParams(max_offset=0, max_error_frac=0.07)
+        read_len = 150
+        base_seq = "C" * read_len
+        qual = "I" * read_len
+
+        # --- Case 1: Both miss (tail-only similarity) ---
+        # Break all k-mers in the first three windows [0-75]
+        # but leave the tail [75-150] clean.
+        read2_tail_only_list = list(base_seq)
+        # 3 changes per 25bp window to disrupt all 7-mers
+        for idx in [6, 13, 20, 31, 38, 45, 56, 63, 70]:
+            read2_tail_only_list[idx] = "T"
+        read2_tail_only = "".join(read2_tail_only_list)
+
+        rp1 = ReadPair("r1", base_seq, base_seq, qual, qual)
+        rp2_tail = ReadPair("r2_tail", read2_tail_only, read2_tail_only, qual, qual)
+
+        # Both implementations: All windows contain mismatches -> No shared
+        # minimizers
+        mapping = dedup_func([rp1, rp2_tail], d_params, m_params, verbose=False)
+        assert mapping["r1"] != mapping["r2_tail"], \
+            "Should miss tail-only similarity (windows only cover first 75bp)"
+
+        # --- Case 2: Both hit (window 1 has similarity) ---
+        # Break k-mers in windows 0 and 2, but leave window 1 [25-50] clean
+        read2_mid_match_list = list(base_seq)
+        for idx in [6, 13, 20, 56, 63, 70]:
+            read2_mid_match_list[idx] = "T"
+        read2_mid_match = "".join(read2_mid_match_list)
+
+        rp2_mid = ReadPair("r2_mid", read2_mid_match, read2_mid_match, qual, qual)
+
+        # Both implementations: Window 1 [25-50] is intact -> Shares minimizer
+        mapping2 = dedup_func([rp1, rp2_mid], d_params, m_params, verbose=False)
+        assert mapping2["r1"] == mapping2["r2_mid"], \
+            "Should detect similarity via shared minimizer in window 1"

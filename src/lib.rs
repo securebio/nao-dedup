@@ -152,14 +152,17 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
     };
 
     let mut minimizers = Vec::with_capacity(params.num_windows);
-    let step = if params.num_windows > 1 {
-        (seq_len.saturating_sub(params.window_len)) / (params.num_windows - 1)
-    } else {
-        0
-    };
 
+    // Use adjacent windows starting from the beginning of the read
+    // This matches Python's strategy: window i covers [i*window_len, (i+1)*window_len]
     for i in 0..params.num_windows {
-        let window_start = (i * step).min(seq_len.saturating_sub(params.window_len));
+        let window_start = i * params.window_len;
+
+        // Stop if this window would start beyond the sequence
+        if window_start >= seq_len {
+            break;
+        }
+
         let window_end = (window_start + params.window_len).min(seq_len);
 
         if window_end - window_start < params.kmer_len {
