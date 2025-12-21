@@ -18,7 +18,6 @@ from dedup import (
     ReadPair,
     _assign_to_buckets,
     _build_graph,
-    _canonical_kmer,
     _extract_minimizer,
     _get_bucket_keys,
     _hash_kmer,
@@ -57,13 +56,6 @@ class TestHelperFunctions:
     def test_reverse_complement_empty(self):
         assert _reverse_complement("") == ""
 
-    def test_canonical_kmer_lexicographic_selection(self):
-        assert _canonical_kmer("AAAA") == "AAAA"  # AAAA vs TTTT
-        assert _canonical_kmer("TTTT") == "AAAA"  # Same result
-        assert _canonical_kmer("ACGT") == "ACGT"  # ACGT vs ACGT (palindrome)
-        assert _canonical_kmer("AAAC") == "AAAC"  # AAAC vs GTTT
-        assert _canonical_kmer("GTTT") == "AAAC"  # Same result
-
     def test_mismatch_count_equal_length(self):
         assert _mismatch_count("AAAA", "AAAA") == 0
         assert _mismatch_count("AAAA", "TTTT") == 4
@@ -80,25 +72,6 @@ class TestHelperFunctions:
 
 class TestMinimizerExtraction:
     """Test minimizer extraction functions."""
-
-    def test_canonical_kmer_affects_minimizers(self):
-        """Test that canonical k-mers make minimizer extraction strand-agnostic.
-
-        A k-mer and its reverse complement should produce the same hash when
-        using canonical k-mers. This ensures that a DNA sequence and its
-        reverse complement will have the same minimizers.
-        """
-        # Use a simple non-palindromic k-mer
-        # AAACCC -> reverse complement is GGGTTT
-        # canonical should be AAACCC (lexicographically smaller)
-        kmer1 = "AAACCC"
-        kmer2 = _reverse_complement(kmer1)  # GGGTTT
-
-        # Both should hash to the same value (the canonical one)
-        hash1 = _hash_kmer(_canonical_kmer(kmer1))
-        hash2 = _hash_kmer(_canonical_kmer(kmer2))
-
-        assert hash1 == hash2, f"Canonical k-mers should produce same hash: {hash1} vs {hash2}"
 
     def test_extract_minimizer_normal_window(self):
         params = MinimizerParams(num_windows=2, window_len=20, kmer_len=7)
