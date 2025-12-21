@@ -9,3 +9,4 @@ crate-type = ["rlib"]
 
 [dependencies]
 ahash = "0.8"
+rustc-hash = "2.1"

@@ -1,6 +1,5 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::collections::HashMap;
 
 use nao_dedup::{deduplicate_read_pairs, DedupParams, MinimizerParams, ReadPair};
 
@@ -80,8 +79,7 @@ fn deduplicate_read_pairs_rust(
     }
 
     // Run deduplication
-    let result: HashMap<String, String> =
-        deduplicate_read_pairs(rust_read_pairs, rust_dedup_params, rust_minimizer_params);
+    let result = deduplicate_read_pairs(rust_read_pairs, rust_dedup_params, rust_minimizer_params);
 
     // Convert result to Python dict
     let py_dict = PyDict::new_bound(py);

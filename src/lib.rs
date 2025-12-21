@@ -1,5 +1,5 @@
 use ahash::AHashMap;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 // ============================================================================
 // Configuration Parameters
@@ -312,17 +312,23 @@ pub struct DedupContext {
     dedup_params: DedupParams,
     minimizer_params: MinimizerParams,
 
+    // We use FxHashMap for buckets because it's super fast, but requires
+    // well-distributed keys, which we do have in this case.  We use AHashMap
+    // otherwise, because it's much faster than std::collections::HashMap
+    // (we don't need the standard HashMap's cryptographic protections) but
+    // doesn't require well-distributed keys).
+
     // Minimizer buckets: minimizer -> list of exemplar IDs
-    buckets: AHashMap<u64, Vec<String>>,
+    buckets: FxHashMap<u64, Vec<String>>,
 
     // Exemplar storage: Only store ReadPair data for exemplars
-    exemplar_store: HashMap<String, ReadPair>,
+    exemplar_store: AHashMap<String, ReadPair>,
 
     // Result mapping: read_id -> exemplar_id (grows linearly with total reads)
-    results: HashMap<String, String>,
+    results: AHashMap<String, String>,
 
     // Cluster stats: initial_exemplar_id -> ClusterStats
-    clusters: HashMap<String, ClusterStats>,
+    clusters: AHashMap<String, ClusterStats>,
 
     // Finalized flag
     finalized: bool,
@@ -333,10 +339,10 @@ impl DedupContext {
         Self {
             dedup_params,
             minimizer_params,
-            buckets: AHashMap::new(),
-            exemplar_store: HashMap::new(),
-            results: HashMap::new(),
-            clusters: HashMap::new(),
+            buckets: FxHashMap::default(),
+            exemplar_store: AHashMap::new(),
+            results: AHashMap::new(),
+            clusters: AHashMap::new(),
             finalized: false,
         }
     }
@@ -417,7 +423,7 @@ impl DedupContext {
 
     pub fn finalize(&mut self) {
         // Resolve exemplars to cluster best reads
-        let mut final_results = HashMap::new();
+        let mut final_results = AHashMap::new();
 
         for read_id in self.results.keys() {
             // Get the cluster this read was assigned to
@@ -465,7 +471,7 @@ pub fn deduplicate_read_pairs(
     read_pairs: Vec<ReadPair>,
     dedup_params: Option<DedupParams>,
     minimizer_params: Option<MinimizerParams>,
-) -> HashMap<String, String> {
+) -> AHashMap<String, String> {
     let dedup_params = dedup_params.unwrap_or_default();
     let minimizer_params = minimizer_params.unwrap_or_default();
 
