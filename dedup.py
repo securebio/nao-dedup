@@ -252,8 +252,9 @@ def _read_pairs_equivalent(rp1: ReadPair, rp2: ReadPair, params: DedupParams) ->
     """
     Test if two read pairs are equivalent (duplicates).
 
-    In strict mode: F1-R1 must match F2-R2
-    In tolerant mode: Also checks F1-R1 against R2-F2 (swapped orientation)
+    In strict mode: Only checks standard orientation (F1, R1) vs (F2, R2)
+    In tolerant mode: Also checks RC-swapped orientation (F1, R1) vs (RC(R2), RC(F2))
+      which represents the same DNA fragment sequenced from the opposite strand
     """
     # Always check standard orientation
     if _sequences_match(rp1.fwd_seq, rp2.fwd_seq, params) and _sequences_match(
@@ -261,10 +262,15 @@ def _read_pairs_equivalent(rp1: ReadPair, rp2: ReadPair, params: DedupParams) ->
     ):
         return True
 
-    # In tolerant mode, also check swapped orientation
+    # In tolerant mode, check RC-swapped orientation
     if params.orientation == ORIENT_TOLERANT:
-        if _sequences_match(rp1.fwd_seq, rp2.rev_seq, params) and _sequences_match(
-            rp1.rev_seq, rp2.fwd_seq, params
+        # RC-swapped orientation: (fwd, rev) matches (RC(rev), RC(fwd))
+        # This represents the same DNA fragment sequenced from the opposite strand
+        rp2_fwd_rc = _reverse_complement(rp2.fwd_seq)
+        rp2_rev_rc = _reverse_complement(rp2.rev_seq)
+
+        if _sequences_match(rp1.fwd_seq, rp2_rev_rc, params) and _sequences_match(
+            rp1.rev_seq, rp2_fwd_rc, params
         ):
             return True
 
@@ -506,10 +512,15 @@ def _find_matching_exemplar(
                     _sequences_match(rp.rev_seq, exemplar.rev_seq, dedup_params)):
                     return exemplar.read_id
 
-                # Check swapped orientation if in tolerant mode
+                # In tolerant mode, check RC-swapped orientation
                 if dedup_params.orientation == ORIENT_TOLERANT:
-                    if (_sequences_match(rp.fwd_seq, exemplar.rev_seq, dedup_params) and
-                        _sequences_match(rp.rev_seq, exemplar.fwd_seq, dedup_params)):
+                    # RC-swapped orientation: (fwd, rev) matches (RC(rev), RC(fwd))
+                    # This represents the same DNA fragment sequenced from the opposite strand
+                    exemplar_fwd_rc = _reverse_complement(exemplar.fwd_seq)
+                    exemplar_rev_rc = _reverse_complement(exemplar.rev_seq)
+
+                    if (_sequences_match(rp.fwd_seq, exemplar_rev_rc, dedup_params) and
+                        _sequences_match(rp.rev_seq, exemplar_fwd_rc, dedup_params)):
                         return exemplar.read_id
 
     return None

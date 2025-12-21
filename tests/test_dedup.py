@@ -21,6 +21,7 @@ from dedup import (
     _canonical_kmer,
     _extract_minimizer,
     _get_bucket_keys,
+    _hash_kmer,
     _mismatch_count,
     _read_pairs_equivalent,
     _reverse_complement,
@@ -79,6 +80,25 @@ class TestHelperFunctions:
 
 class TestMinimizerExtraction:
     """Test minimizer extraction functions."""
+
+    def test_canonical_kmer_affects_minimizers(self):
+        """Test that canonical k-mers make minimizer extraction strand-agnostic.
+
+        A k-mer and its reverse complement should produce the same hash when
+        using canonical k-mers. This ensures that a DNA sequence and its
+        reverse complement will have the same minimizers.
+        """
+        # Use a simple non-palindromic k-mer
+        # AAACCC -> reverse complement is GGGTTT
+        # canonical should be AAACCC (lexicographically smaller)
+        kmer1 = "AAACCC"
+        kmer2 = _reverse_complement(kmer1)  # GGGTTT
+
+        # Both should hash to the same value (the canonical one)
+        hash1 = _hash_kmer(_canonical_kmer(kmer1))
+        hash2 = _hash_kmer(_canonical_kmer(kmer2))
+
+        assert hash1 == hash2, f"Canonical k-mers should produce same hash: {hash1} vs {hash2}"
 
     def test_extract_minimizer_normal_window(self):
         params = MinimizerParams(num_windows=2, window_len=20, kmer_len=7)
@@ -154,6 +174,36 @@ class TestMinimizerExtraction:
         assert len(keys) == 8
         assert all(isinstance(key, tuple) and len(key) == 2 for key in keys)
 
+    def test_reverse_complement_shares_buckets(self):
+        """Test that a sequence and its reverse complement share buckets.
+
+        This verifies that canonical k-mers work correctly - sequences that
+        are reverse complements should have the same minimizers and thus
+        end up in the same buckets for comparison.
+        """
+        # Create a non-palindromic sequence
+        seq = "AAACCCGGGAAA" * 10  # 120bp, clearly directional
+        seq_rc = _reverse_complement(seq)
+
+        # Verify they're different sequences (not palindromic)
+        assert seq != seq_rc
+
+        params = MinimizerParams(num_windows=3, window_len=25, kmer_len=7)
+
+        # Create read pairs
+        rp1 = ReadPair("r1", seq, seq, "I" * 120, "I" * 120)
+        rp2 = ReadPair("r2", seq_rc, seq_rc, "I" * 120, "I" * 120)
+
+        # Get buckets for both
+        keys1 = _get_bucket_keys(rp1, params, ORIENT_TOLERANT)
+        keys2 = _get_bucket_keys(rp2, params, ORIENT_TOLERANT)
+
+        # They should share at least one bucket due to canonical k-mers
+        shared_keys = keys1 & keys2
+        assert len(shared_keys) > 0, \
+            f"Reverse complement sequences should share buckets (canonical k-mers). " \
+            f"keys1: {len(keys1)}, keys2: {len(keys2)}, shared: {len(shared_keys)}"
+
 
 class TestSequenceMatching:
     """Test sequence matching functions."""
@@ -198,24 +248,6 @@ class TestSequenceMatching:
 
         assert _read_pairs_equivalent(rp1, rp2, params)
         assert not _read_pairs_equivalent(rp1, rp3, params)
-
-    def test_read_pairs_equivalent_swapped_tolerant(self):
-        # In tolerant mode, should match F1-R1 vs R2-F2
-        params = DedupParams(max_offset=1, max_error_frac=0.01, orientation=ORIENT_TOLERANT)
-
-        rp1 = ReadPair("read1", "AAAA", "TTTT", "IIII", "IIII")
-        rp2 = ReadPair("read2", "TTTT", "AAAA", "IIII", "IIII")  # Swapped F/R
-
-        assert _read_pairs_equivalent(rp1, rp2, params)
-
-    def test_read_pairs_equivalent_swapped_strict(self):
-        # In strict mode, should NOT match swapped orientation
-        params = DedupParams(max_offset=1, max_error_frac=0.01, orientation=ORIENT_STRICT)
-
-        rp1 = ReadPair("read1", "AAAA", "TTTT", "IIII", "IIII")
-        rp2 = ReadPair("read2", "TTTT", "AAAA", "IIII", "IIII")  # Swapped F/R
-
-        assert not _read_pairs_equivalent(rp1, rp2, params)
 
     def test_read_pairs_equivalent_no_match(self):
         params = DedupParams(max_offset=1, max_error_frac=0.01, orientation=ORIENT_TOLERANT)
@@ -835,3 +867,46 @@ class TestDeduplication:
             # Streaming: no minimizers means each is separate
             assert mapping["r1"] == "r1", "r1 should be its own exemplar"
             assert mapping["r2"] == "r2", "r2 should be its own exemplar"
+
+    def test_reverse_complement_deduplication(self, dedup_func):
+        """
+        Verify that a sequence and its reverse complement are considered duplicates.
+
+        This test verifies that the deduplication logic identifies the same DNA molecule
+        sequenced from opposite strands as duplicates.
+
+        RP1: (SeqA, SeqB)
+        RP2: (RC(SeqB), RC(SeqA)) - RC-swapped orientation
+
+        When sequencing the same DNA fragment from the opposite strand:
+        - What was forward becomes RC(reverse)
+        - What was reverse becomes RC(forward)
+
+        The implementation uses canonical k-mers for bucketing (so they will be compared)
+        and checks RC-swapped orientation during similarity matching.
+        """
+        # Create non-palindromic sequences
+        seq_a = "AAAAAAAAAA" + "CCCCCCCCCC" + "GGGGGGGGGG" + "AAAAAAAAAA"  # Non-palindromic
+        seq_b = "TTTTTTTTTT" + "GGGGGGGGGG" + "CCCCCCCCCC" + "TTTTTTTTTT"
+
+        seq_a_rc = _reverse_complement(seq_a)
+        seq_b_rc = _reverse_complement(seq_b)
+
+        # Verify they are actually different strings
+        assert seq_a != seq_a_rc
+
+        qual = "I" * 40
+
+        # RP1: Original orientation
+        rp1 = ReadPair("r1", seq_a, seq_b, qual, qual)
+
+        # RP2: Same DNA fragment sequenced from opposite strand
+        # Forward becomes RC(reverse), reverse becomes RC(forward)
+        rp2 = ReadPair("r2", seq_b_rc, seq_a_rc, qual, qual)
+
+        mapping = dedup_func([rp1, rp2], verbose=False)
+
+        # Assertion: They should be clustered together
+        assert mapping["r1"] == mapping["r2"], \
+            f"Reverse complement sequences not deduplicated. " \
+            f"R1: {mapping['r1']}, R2: {mapping['r2']}"

@@ -115,6 +115,27 @@ fn encode_base(b: u8) -> Option<u64> {
     }
 }
 
+/// Get complement of a base as 2-bit encoded value
+#[inline(always)]
+fn complement_encoded(encoded: u64) -> u64 {
+    // A(0) <-> T(3), C(1) <-> G(2)
+    3 - encoded
+}
+
+/// Compute reverse complement of a DNA sequence
+fn reverse_complement(seq: &str) -> String {
+    seq.bytes()
+        .rev()
+        .map(|b| match b {
+            b'A' | b'a' => 'T',
+            b'C' | b'c' => 'G',
+            b'G' | b'g' => 'C',
+            b'T' | b't' => 'A',
+            _ => 'N',  // Non-ACGT bases become N
+        })
+        .collect()
+}
+
 fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
     let seq_bytes = seq.as_bytes();
     let seq_len = seq_bytes.len();
@@ -147,27 +168,34 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
 
         let mut min_hash = u64::MAX;
 
-        // Rolling hash state
-        let mut hash: u64 = 0;
-        let mut valid_len: usize = 0; // how many valid A/C/G/T bases in current run
+        // Rolling hash state for both forward and reverse complement
+        let mut hash_fwd: u64 = 0;
+        let mut hash_rc: u64 = 0;
+        let mut valid_len: usize = 0; // number of consecutive valid ACGT bases
 
         // We're using bit packing to make the "hashes" for our minimizers,
-        // which is technically not hashing since its invertable.  But that
+        // which is technically not hashing since it's invertible.  But that
         // just makes it a very good hash function for our purposes!
         for pos in window_start..window_end {
-            if let Some(v) = encode_base(seq_bytes[pos]) {
-                hash = ((hash << 2) | v) & mask;
-                if valid_len < params.kmer_len {
-                    valid_len += 1;
-                }
+            if let Some(encoded) = encode_base(seq_bytes[pos]) {
+                // Update forward hash: shift left, add new base
+                hash_fwd = ((hash_fwd << 2) | encoded) & mask;
 
-                if valid_len == params.kmer_len {
-                    // we have a full-length k-mer ending at `pos`
-                    min_hash = min_hash.min(hash);
+                // Update reverse complement hash: shift right, add complement at left
+                let complement = complement_encoded(encoded);
+                hash_rc = (hash_rc >> 2) | (complement << (2 * (params.kmer_len - 1)));
+
+                valid_len += 1;
+
+                if valid_len >= params.kmer_len {
+                    // We have a full k-mer - take the canonical (minimum) hash
+                    let canonical_hash = hash_fwd.min(hash_rc);
+                    min_hash = min_hash.min(canonical_hash);
                 }
             } else {
-                // Non-ACGT base: reset to skip k-mers containing ambiguous bases
-                hash = 0;
+                // Non-ACGT base: reset
+                hash_fwd = 0;
+                hash_rc = 0;
                 valid_len = 0;
             }
         }
@@ -228,8 +256,12 @@ fn check_similarity(
 
 /// Check if two read pairs are similar enough to be considered duplicates.
 ///
-/// Always checks both standard orientation (Fwd-Fwd, Rev-Rev) and swapped
-/// orientation (Fwd-Rev, Rev-Fwd). This matches Python's ORIENT_TOLERANT mode.
+/// Checks two orientations:
+/// 1. Standard: (Fwd, Rev) vs (Fwd, Rev)
+/// 2. RC-Swapped: (Fwd, Rev) vs (RC(Rev), RC(Fwd))
+///    This represents the same DNA fragment sequenced from the opposite strand
+///
+/// This matches Python's ORIENT_TOLERANT mode.
 /// Unlike the Python implementation, the Rust version does not support strict
 /// orientation mode.
 fn reads_are_similar(
@@ -244,9 +276,13 @@ fn reads_are_similar(
         return true;
     }
 
-    // 2. Swapped Orientation (Fwd-Rev, Rev-Fwd)
-    if check_similarity(&rp1.fwd_seq, &rp2.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
-        && check_similarity(&rp1.rev_seq, &rp2.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
+    // 2. RC-Swapped Orientation: (Fwd, Rev) matches (RC(Rev), RC(Fwd))
+    // This represents the same DNA fragment sequenced from the opposite strand
+    let rp2_fwd_rc = reverse_complement(&rp2.fwd_seq);
+    let rp2_rev_rc = reverse_complement(&rp2.rev_seq);
+
+    if check_similarity(&rp1.fwd_seq, &rp2_rev_rc, dedup_params.max_offset, dedup_params.max_error_frac)
+        && check_similarity(&rp1.rev_seq, &rp2_fwd_rc, dedup_params.max_offset, dedup_params.max_error_frac)
     {
         return true;
     }
