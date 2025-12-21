@@ -138,9 +138,7 @@ def _extract_minimizer(seq: str, window_idx: int, params: MinimizerParams) -> in
     """
     Extract the minimizer hash from a specific window of the sequence.
 
-    For each k-mer in the window, computes the canonical hash as the minimum
-    of the forward and reverse complement hashes. Returns the smallest
-    canonical hash found in the window (the minimizer).
+    Returns the smallest hash found in the window (the minimizer).
 
     Args:
         seq: DNA sequence
@@ -148,7 +146,7 @@ def _extract_minimizer(seq: str, window_idx: int, params: MinimizerParams) -> in
         params: Minimizer parameters
 
     Returns:
-        Minimum canonical hash in the window (min of all min(hash_fwd, hash_rc))
+        Minimum hash in the window
     """
     start = window_idx * params.window_len
     end = min(len(seq), start + params.window_len)
@@ -158,17 +156,11 @@ def _extract_minimizer(seq: str, window_idx: int, params: MinimizerParams) -> in
         return EMPTY_KMER_SENTINEL_HASH
 
     # Find minimizer (smallest hash) in this window
-    # Use min-of-hashes approach (matches Rust implementation)
     bigger_than_hash = sys.maxsize + 1
     min_hash = bigger_than_hash
     for i in range(start, end - params.kmer_len + 1):
         kmer = seq[i : i + params.kmer_len]
-
-        # Compute canonical hash as min(hash_fwd, hash_rc)
-        h = min(_hash_kmer(kmer), _hash_kmer(_reverse_complement(kmer)))
-
-        if h < min_hash:
-            min_hash = h
+        min_hash = min(_hash_kmer(kmer), min_hash)
 
     return min_hash if min_hash != bigger_than_hash else EMPTY_KMER_SENTINEL_HASH
 

@@ -101,10 +101,6 @@ impl ReadPair {
 //
 // Strategy: Use 2-bit encoding (A=0,C=1,G=2,T=3) to pack k-mers into u64.
 // This allows fast rolling hash computation and comparison.
-//
-// For canonical k-mers: we maintain both forward and reverse-complement hashes
-// simultaneously, then take min(fwd, rc) at each position. This is much faster
-// than computing RC as a string and comparing lexicographically.
 // ============================================================================
 
 #[inline(always)]
@@ -118,14 +114,9 @@ fn encode_base(b: u8) -> Option<u64> {
     }
 }
 
-#[inline(always)]
-fn complement_encoded(encoded: u64) -> u64 {
-    3 - encoded  // A(0) <-> T(3), C(1) <-> G(2)
-}
-
 /// Extract one minimizer per window from a sequence.
 ///
-/// Uses rolling hash to efficiently compute canonical k-mers (min of forward/RC).
+/// Uses rolling hash to efficiently compute k-mer hashes.
 /// Windows are adjacent starting from position 0, focusing on the most reliable
 /// portion of the read (quality typically degrades toward the end).
 fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
@@ -145,55 +136,40 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
 
     let mut minimizers = Vec::with_capacity(params.num_windows);
 
+
     // Use adjacent windows starting from the beginning of the read
     // This matches Python's strategy: window i covers
     // [i*window_len, (i+1)*window_len]
     for i in 0..params.num_windows {
         let window_start = i * params.window_len;
 
-        // Stop if this window would start beyond the sequence
         if window_start >= seq_len {
             break;
         }
 
         let window_end = (window_start + params.window_len).min(seq_len);
 
+        // Stop if this window would start beyond the sequence
         if window_end - window_start < params.kmer_len {
             break;
         }
 
         let mut min_hash = u64::MAX;
-
-        // Maintain rolling hashes for both forward and reverse-complement
-        // This avoids string operations for RC computation
-        let mut hash_fwd: u64 = 0;
-        let mut hash_rc: u64 = 0;
+        let mut hash: u64 = 0;
         let mut valid_len: usize = 0;  // number of consecutive valid ACGT bases
 
-        // We're using bit packing to make the "hashes" for our minimizers,
-        // which is technically not hashing since it's invertible. But that
-        // just makes it a very good hash function for our purposes!
         for pos in window_start..window_end {
             if let Some(encoded) = encode_base(seq_bytes[pos]) {
                 // Update forward hash: shift left, add new base
-                hash_fwd = ((hash_fwd << 2) | encoded) & mask;
-
-                // Update reverse complement hash: shift right, add complement
-                // at left
-                let complement = complement_encoded(encoded);
-                hash_rc = (hash_rc >> 2) | (complement << (2 * (params.kmer_len - 1)));
-
+                hash = ((hash << 2) | encoded) & mask;
                 valid_len += 1;
 
                 if valid_len >= params.kmer_len {
-                    // We have a full k-mer - take the canonical (minimum) hash
-                    let canonical_hash = hash_fwd.min(hash_rc);
-                    min_hash = min_hash.min(canonical_hash);
+                    min_hash = min_hash.min(hash);
                 }
             } else {
                 // Non-ACGT base: reset
-                hash_fwd = 0;
-                hash_rc = 0;
+                hash = 0;
                 valid_len = 0;
             }
         }

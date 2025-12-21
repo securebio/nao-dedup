@@ -147,37 +147,6 @@ class TestMinimizerExtraction:
         assert len(keys) == 8
         assert all(isinstance(key, tuple) and len(key) == 2 for key in keys)
 
-    def test_reverse_complement_shares_buckets(self):
-        """Test that a sequence and its reverse complement share buckets.
-
-        This verifies that canonical k-mers work correctly - sequences that
-        are reverse complements should have the same minimizers and thus
-        end up in the same buckets for comparison.
-        """
-        # Create a non-palindromic sequence
-        seq = "AAACCCGGGAAA" * 10  # 120bp, clearly directional
-        seq_rc = _reverse_complement(seq)
-
-        # Verify they're different sequences (not palindromic)
-        assert seq != seq_rc
-
-        params = MinimizerParams(num_windows=3, window_len=25, kmer_len=7)
-
-        # Create read pairs
-        rp1 = ReadPair("r1", seq, seq, "I" * 120, "I" * 120)
-        rp2 = ReadPair("r2", seq_rc, seq_rc, "I" * 120, "I" * 120)
-
-        # Get buckets for both
-        keys1 = _get_bucket_keys(rp1, params, ORIENT_TOLERANT)
-        keys2 = _get_bucket_keys(rp2, params, ORIENT_TOLERANT)
-
-        # They should share at least one bucket due to canonical k-mers
-        shared_keys = keys1 & keys2
-        assert len(shared_keys) > 0, \
-            f"Reverse complement sequences should share buckets (canonical k-mers). " \
-            f"keys1: {len(keys1)}, keys2: {len(keys2)}, shared: {len(shared_keys)}"
-
-
 class TestSequenceMatching:
     """Test sequence matching functions."""
 
