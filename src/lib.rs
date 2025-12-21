@@ -1,4 +1,4 @@
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use rustc_hash::FxHashMap;
 
 // ============================================================================
@@ -380,12 +380,18 @@ impl DedupContext {
         let mut all_mins = fwd_mins;
         all_mins.extend(rev_mins);
 
-        // Find matching exemplar by checking buckets (use FIRST match found)
+        // Track which candidates we've already checked to avoid redundant comparisons
+        // (same candidate can appear in multiple buckets if it shares multiple minimizers)
+        let mut checked_ids = AHashSet::new();
         let mut matching_exemplar: Option<String> = None;
 
         'outer: for &min_hash in &all_mins {
             if let Some(bucket_reads) = self.buckets.get(&min_hash) {
                 for candidate_id in bucket_reads {
+                    if !checked_ids.insert(candidate_id.clone()) {
+                        continue;  // Already checked this candidate
+                    }
+
                     if let Some(candidate) = self.exemplar_store.get(candidate_id) {
                         if reads_are_similar(&read_pair, candidate, &self.dedup_params) {
                             let candidate_exemplar = self.results.get(candidate_id)
@@ -393,7 +399,7 @@ impl DedupContext {
                                 .unwrap_or_else(|| candidate_id.clone());
 
                             matching_exemplar = Some(candidate_exemplar);
-                            break 'outer;  // Use first match found
+                            break 'outer;
                         }
                     }
                 }
