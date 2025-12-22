@@ -192,9 +192,9 @@ ctx.finalize();
 #### Query Results
 
 ```rust
-// After finalization, query final exemplars
-let exemplar = ctx.get_final_exemplar("read1");
-println!("read1 -> {}", exemplar);
+// After finalization, query cluster IDs
+let cluster_id = ctx.get_cluster_id("read1");
+println!("read1 -> {}", cluster_id);
 
 // Get statistics
 let (total_processed, unique_clusters) = ctx.stats();

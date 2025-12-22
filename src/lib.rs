@@ -292,16 +292,16 @@ pub struct DedupContext {
     // - AHashMap for String keys: much faster than std HashMap (which uses
     //   cryptographic SipHash), and we don't need DOS protection
 
-    // minimizer -> list of exemplar IDs
+    // minimizer -> list of cluster IDs
     buckets: FxHashMap<u64, Vec<String>>,
 
     // exemplarID -> read content
     exemplar_store: AHashMap<String, ReadPair>,
 
-    // read_id -> exemplar_id (grows linearly with total reads)
+    // read_id -> cluster_id (grows linearly with total reads)
     results: AHashMap<String, String>,
 
-    // initial_exemplar_id -> ClusterStats
+    // cluster_id -> ClusterStats
     clusters: AHashMap<String, ClusterStats>,
 
     finalized: bool,
@@ -320,7 +320,7 @@ impl DedupContext {
         }
     }
 
-    /// Process one read pair. Returns the exemplar ID it was assigned to.
+    /// Process one read pair. Returns the cluster ID it was assigned to.
     ///
     /// Algorithm:
     /// 1. Extract minimizers and look up matching exemplars in buckets
@@ -340,7 +340,7 @@ impl DedupContext {
         // Track which candidates we've already checked to avoid redundant comparisons
         // (same candidate can appear in multiple buckets if it shares multiple minimizers)
         let mut checked_ids = AHashSet::new();
-        let mut matching_exemplar: Option<String> = None;
+        let mut matching_cluster_id: Option<String> = None;
 
         'outer: for &min_hash in &all_mins {
             if let Some(bucket_reads) = self.buckets.get(&min_hash) {
@@ -351,11 +351,11 @@ impl DedupContext {
 
                     if let Some(candidate) = self.exemplar_store.get(candidate_id) {
                         if reads_are_similar(&read_pair, candidate, &self.dedup_params) {
-                            let candidate_exemplar = self.results.get(candidate_id)
+                            let candidate_cluster_id = self.results.get(candidate_id)
                                 .cloned()
                                 .unwrap_or_else(|| candidate_id.clone());
 
-                            matching_exemplar = Some(candidate_exemplar);
+                            matching_cluster_id = Some(candidate_cluster_id);
                             break 'outer;
                         }
                     }
@@ -363,9 +363,9 @@ impl DedupContext {
             }
         }
 
-        let exemplar_id = if let Some(exemplar) = matching_exemplar {
+        let cluster_id = if let Some(cluster_id) = matching_cluster_id {
             // Found a match - add to existing cluster
-            if let Some(cluster) = self.clusters.get_mut(&exemplar) {
+            if let Some(cluster) = self.clusters.get_mut(&cluster_id) {
                 cluster.count += 1;
                 // Update best read if this one is better
                 if mean_q > cluster.best_score {
@@ -373,7 +373,7 @@ impl DedupContext {
                     cluster.best_score = mean_q;
                 }
             }
-            exemplar
+            cluster_id
         } else {
             // New unique sequence - create new cluster
             self.clusters.insert(
@@ -396,9 +396,9 @@ impl DedupContext {
             read_id.clone()
         };
 
-        self.results.insert(read_id.clone(), exemplar_id.clone());
+        self.results.insert(read_id.clone(), cluster_id.clone());
 
-        exemplar_id
+        cluster_id
     }
 
     /// Finalize results: resolve all reads to their cluster's best_read_id.
@@ -413,13 +413,13 @@ impl DedupContext {
                 .cloned()
                 .unwrap_or_else(|| read_id.clone());
 
-            let final_exemplar = if let Some(cluster) = self.clusters.get(&cluster_key) {
+            let final_cluster_id = if let Some(cluster) = self.clusters.get(&cluster_key) {
                 cluster.best_read_id.clone()
             } else {
                 cluster_key
             };
 
-            final_results.insert(read_id.clone(), final_exemplar);
+            final_results.insert(read_id.clone(), final_cluster_id);
         }
 
         self.results = final_results;
@@ -429,7 +429,7 @@ impl DedupContext {
         self.exemplar_store.clear();
     }
 
-    pub fn get_final_exemplar(&self, read_id: &str) -> String {
+    pub fn get_cluster_id(&self, read_id: &str) -> String {
         self.results.get(read_id)
             .cloned()
             .unwrap_or_else(|| read_id.to_string())
