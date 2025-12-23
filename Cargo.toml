@@ -1,0 +1,13 @@
+[package]
+name = "nao_dedup"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "nao_dedup"
+crate-type = ["rlib"]
+
+[dependencies]
+ahash = "0.8"
+rustc-hash = "2.1"
+smallvec = "1.13"
