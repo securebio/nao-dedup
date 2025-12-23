@@ -420,7 +420,7 @@ class ClusterStats:
     count: int = 1
 
 
-def _get_stable_keys(rp: ReadPair, params: MinimizerParams) -> set[int]:
+def _get_stable_keys(rp: ReadPair, params: MinimizerParams) -> list[int]:
     """
     Extract minimizer keys from multiple windows to ensure we find matches
     even if the read has errors at the edges.
@@ -439,18 +439,20 @@ def _get_stable_keys(rp: ReadPair, params: MinimizerParams) -> set[int]:
         params: Minimizer parameters
 
     Returns:
-        Set of minimizer hashes
+        List of minimizer hashes in deterministic order (window 0 fwd, window 0 rev,
+        window 1 fwd, ...). May contain duplicates if the same minimizer appears in
+        multiple windows, but checked_ids prevents redundant comparisons.
     """
-    keys = set()
+    keys = []
     for i in range(params.num_windows):
         # Check both Fwd and Rev hashes for maximum tolerance
         k_fwd = _extract_minimizer(rp.fwd_seq, i, params)
         k_rev = _extract_minimizer(rp.rev_seq, i, params)
 
         if k_fwd != EMPTY_KMER_SENTINEL_HASH:
-            keys.add(k_fwd)
+            keys.append(k_fwd)
         if k_rev != EMPTY_KMER_SENTINEL_HASH:
-            keys.add(k_rev)
+            keys.append(k_rev)
 
     return keys
 
@@ -475,7 +477,7 @@ def _calculate_score(rp: ReadPair) -> float:
 
 def _find_matching_exemplar(
     rp: ReadPair,
-    keys: set[int],
+    keys: list[int],
     exemplar_db: dict[int, list[Exemplar]],
     dedup_params: DedupParams
 ) -> Optional[str]:
@@ -484,7 +486,7 @@ def _find_matching_exemplar(
 
     Args:
         rp: ReadPair to match
-        keys: Set of minimizer keys for this read
+        keys: List of minimizer keys for this read (in deterministic order)
         exemplar_db: Database of exemplars indexed by minimizer hash
         dedup_params: Deduplication parameters
 
