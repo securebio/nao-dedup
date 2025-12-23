@@ -429,12 +429,8 @@ impl DedupContext {
 
                     if let Some(candidate) = self.exemplar_store.get(candidate_idx as usize).and_then(|opt| opt.as_ref()) {
                         if reads_are_similar(&read_pair, candidate, &self.dedup_params) {
-                            // Find the cluster leader for this candidate
-                            let candidate_cluster_idx = self.results.get(candidate_idx as usize)
-                                .copied()
-                                .unwrap_or(candidate_idx);
-
-                            matching_cluster_idx = Some(candidate_cluster_idx);
+                            // candidate_idx from buckets is always a cluster leader
+                            matching_cluster_idx = Some(candidate_idx);
                             break 'outer;
                         }
                     }
