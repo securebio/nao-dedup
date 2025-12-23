@@ -331,6 +331,10 @@ impl DedupContext {
         let read_id = read_pair.read_id.clone();
         let mean_q = read_pair.mean_quality();
 
+        // Calculate score: quality is primary (scaled by 1000), length is secondary
+        let length = (read_pair.fwd_seq.len() + read_pair.rev_seq.len()) as f64;
+        let score = mean_q * 1000.0 + length;
+
         let fwd_mins = extract_minimizers(&read_pair.fwd_seq, &self.minimizer_params);
         let rev_mins = extract_minimizers(&read_pair.rev_seq, &self.minimizer_params);
 
@@ -368,9 +372,9 @@ impl DedupContext {
             if let Some(cluster) = self.clusters.get_mut(&cluster_id) {
                 cluster.count += 1;
                 // Update best read if this one is better
-                if mean_q > cluster.best_score {
+                if score > cluster.best_score {
                     cluster.best_read_id = read_id.clone();
-                    cluster.best_score = mean_q;
+                    cluster.best_score = score;
                 }
             }
             cluster_id
@@ -380,7 +384,7 @@ impl DedupContext {
                 read_id.clone(),
                 ClusterStats {
                     best_read_id: read_id.clone(),
-                    best_score: mean_q,
+                    best_score: score,
                     count: 1,
                 },
             );

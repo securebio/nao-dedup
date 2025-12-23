@@ -753,6 +753,53 @@ class TestDeduplication:
         for read_id in ["read1", "read2", "read3", "read4", "read5"]:
             assert mapping[read_id] == "read3", f"{read_id} mapped to {mapping[read_id]}, expected read3"
 
+    def test_best_read_selection_quality_length_tiebreaker(self, dedup_func):
+        """
+        Test that when reads have the same quality, the longer one is chosen as
+        exemplar.
+
+        This test verifies the scoring formula: score = mean_quality * 1000 +
+        length.
+
+        Scenario:
+        1. Read A (shorter, Q=30) creates cluster
+        2. Read B (longer, Q=30) matches A and should become the exemplar
+
+        Since "better" is quality*1000 + length, B should become the exemplar.
+        """
+        # Create identical sequence content, but different lengths
+        # Use same quality (Q=30, which is '?' in Phred+33) for both
+        qual_char = "?"  # Q=30
+
+        # Shorter read: 100 bases
+        seq_short = "A" * 100
+        rpA = ReadPair(
+            "readA", seq_short, seq_short, qual_char * 100, qual_char * 100)
+
+        # Longer read: 150 bases
+        seq_long = "A" * 150
+        rpB = ReadPair(
+            "readB", seq_long, seq_long, qual_char * 150, qual_char * 150)
+
+        # Verify they have the same mean quality
+        assert abs(rpA.mean_qual() - rpB.mean_qual()) < 0.01, \
+            f"Reads should have same quality: A={rpA.mean_qual()}, " \
+            f"B={rpB.mean_qual()}"
+
+        # Process shorter first, then longer
+        read_pairs = [rpA, rpB]
+        mapping = dedup_func(read_pairs, verbose=False)
+
+        # Both should cluster together
+        assert mapping["readA"] == mapping["readB"], \
+            f"Reads should cluster together: A->{mapping['readA']}, "\
+            f"B->{mapping['readB']}"
+
+        # The longer read (readB) should be chosen as the exemplar
+        assert mapping["readA"] == "readB", \
+            f"Expected readB (longer) as exemplar, but got {mapping['readA']}"
+        assert mapping["readB"] == "readB"
+
     def test_windows_with_all_ns(self, dedup_func):
         """
         Test that sequences with windows containing all N's are handled correctly.
