@@ -97,6 +97,14 @@ impl ReadPair {
     }
 }
 
+/// Lightweight representation of an exemplar for similarity checking.
+/// Only stores sequences (not quality strings) to reduce memory footprint.
+#[derive(Clone)]
+struct StoredExemplar {
+    fwd_seq: String,
+    rev_seq: String,
+}
+
 // ============================================================================
 // Minimizer Extraction
 //
@@ -274,18 +282,18 @@ fn check_similarity(
 /// orientation, causing the same DNA fragment to be sequenced with forward/reverse
 /// swapped. Note: Rust version always uses tolerant mode (no strict mode option).
 fn reads_are_similar(
-    rp1: &ReadPair,
-    rp2: &ReadPair,
+    rp: &ReadPair,
+    exemplar: &StoredExemplar,
     dedup_params: &DedupParams,
 ) -> bool {
-    if check_similarity(&rp1.fwd_seq, &rp2.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
-        && check_similarity(&rp1.rev_seq, &rp2.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
+    if check_similarity(&rp.fwd_seq, &exemplar.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
+        && check_similarity(&rp.rev_seq, &exemplar.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
     {
         return true;
     }
 
-    if check_similarity(&rp1.fwd_seq, &rp2.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
-        && check_similarity(&rp1.rev_seq, &rp2.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
+    if check_similarity(&rp.fwd_seq, &exemplar.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
+        && check_similarity(&rp.rev_seq, &exemplar.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
     {
         return true;
     }
@@ -326,8 +334,8 @@ pub struct DedupContext {
     // minimizer -> list of cluster IDs
     buckets: FxHashMap<u64, Vec<String>>,
 
-    // exemplarID -> read content
-    exemplar_store: AHashMap<String, ReadPair>,
+    // exemplarID -> read sequences (quality strings omitted to save memory)
+    exemplar_store: AHashMap<String, StoredExemplar>,
 
     // read_id -> cluster_id (grows linearly with total reads)
     results: AHashMap<String, String>,
@@ -421,8 +429,11 @@ impl DedupContext {
                 },
             );
 
-            // Store the actual ReadPair data (only for new exemplars)
-            self.exemplar_store.insert(read_id.clone(), read_pair);
+            // Store only sequences (not quality strings) to reduce memory footprint
+            self.exemplar_store.insert(read_id.clone(), StoredExemplar {
+                fwd_seq: read_pair.fwd_seq,
+                rev_seq: read_pair.rev_seq,
+            });
 
             // Add read to minimizer buckets (only for new exemplars)
             for &min_hash in &all_mins {
