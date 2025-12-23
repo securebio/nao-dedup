@@ -121,15 +121,14 @@ impl IDRegistry {
     }
 
     /// Get or create an index for a read ID
-    fn get_or_create(&mut self, id: String) -> u32 {
-        if let Some(&idx) = self.id_to_index.get(&id) {
-            idx
-        } else {
-            let idx = self.index_to_id.len() as u32;
-            self.index_to_id.push(id.clone());
-            self.id_to_index.insert(id, idx);
-            idx
+    fn get_or_create(&mut self, id: &str) -> u32 {
+        if let Some(&idx) = self.id_to_index.get(id) {
+            return idx;
         }
+        let idx = self.index_to_id.len() as u32;
+        self.index_to_id.push(id.to_string());
+        self.id_to_index.insert(id.to_string(), idx);
+        idx
     }
 
     /// Convert index back to read ID
@@ -404,7 +403,7 @@ impl DedupContext {
     /// 3b. If no match: create new cluster with this read as initial exemplar
     pub fn process_read(&mut self, read_pair: ReadPair) -> String {
         // Intern the read ID to a compact u32 index
-        let read_idx = self.id_registry.get_or_create(read_pair.read_id.clone());
+        let read_idx = self.id_registry.get_or_create(&read_pair.read_id);
         let mean_q = read_pair.mean_quality();
 
         // Calculate score: quality is primary (scaled by 1000), length is secondary
