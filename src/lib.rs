@@ -198,8 +198,9 @@ fn check_similarity(
     let s1 = seq1.as_bytes();
     let s2 = seq2.as_bytes();
 
-    // Closure to check one alignment direction
-    let check_one_way = |seqa: &[u8], seqb: &[u8], off: usize| -> bool {
+    // Optimized helper function with early exit for hot path performance
+    #[inline]
+    fn check_one_way(seqa: &[u8], seqb: &[u8], off: usize, max_error_frac: f64) -> bool {
         if off >= seqa.len() {
             return false;
         }
@@ -208,24 +209,38 @@ fn check_similarity(
             return false;
         }
 
-        let mismatches = seqa[off..off + overlap_len]
-            .iter()
-            .zip(&seqb[..overlap_len])
-            .filter(|(a, b)| *a != *b)
-            .count();
+        // Pre-calculate error budget to avoid floating-point division in the loop
+        let max_errors = (max_error_frac * overlap_len as f64).floor() as usize;
+        if off > max_errors {
+            return false; // Offset alone exceeds budget
+        }
 
-        let total_errors = mismatches + off;
-        (total_errors as f64) / (overlap_len as f64) <= max_error_frac
-    };
+        let allowed_mismatches = max_errors - off;
+        let mut mismatches = 0;
+
+        let a_part = &seqa[off..off + overlap_len];
+        let b_part = &seqb[..overlap_len];
+
+        // Manual loop for early exit when error budget is exceeded
+        for i in 0..overlap_len {
+            if a_part[i] != b_part[i] {
+                mismatches += 1;
+                if mismatches > allowed_mismatches {
+                    return false; // Short-circuit early!
+                }
+            }
+        }
+        true
+    }
 
     for offset in 0..=max_offset {
         // Check with s1 shifted left relative to s2
-        if check_one_way(s1, s2, offset) {
+        if check_one_way(s1, s2, offset, max_error_frac) {
             return true;
         }
         // Check with s2 shifted left relative to s1 (equivalent to s1 shifted
         // right)
-        if offset > 0 && check_one_way(s2, s1, offset) {
+        if offset > 0 && check_one_way(s2, s1, offset, max_error_frac) {
             return true;
         }
     }
