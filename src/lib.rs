@@ -410,20 +410,14 @@ impl DedupContext {
     /// During streaming, reads point to the cluster key (first exemplar).
     /// After finalization, they point to the best exemplar found for that cluster.
     pub fn finalize(&mut self) {
-        let mut final_results = AHashMap::new();
+        let mut final_results = AHashMap::with_capacity(self.results.len());
 
-        for read_id in self.results.keys() {
-            let cluster_key = self.results.get(read_id)
-                .cloned()
-                .unwrap_or_else(|| read_id.clone());
-
-            let final_cluster_id = if let Some(cluster) = self.clusters.get(&cluster_key) {
-                cluster.best_read_id.clone()
-            } else {
-                cluster_key
-            };
-
-            final_results.insert(read_id.clone(), final_cluster_id);
+        for (read_id, cluster_key) in &self.results {
+            let final_exemplar_id = self.clusters
+                .get(cluster_key)
+                .map(|c| c.best_read_id.clone())
+                .unwrap_or_else(|| cluster_key.clone());
+            final_results.insert(read_id.clone(), final_exemplar_id);
         }
 
         self.results = final_results;
