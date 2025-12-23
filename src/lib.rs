@@ -1,5 +1,6 @@
 use ahash::{AHashMap, AHashSet};
 use rustc_hash::FxHashMap;
+use smallvec::SmallVec;
 
 // ============================================================================
 // Configuration Parameters
@@ -119,12 +120,12 @@ fn encode_base(b: u8) -> Option<u64> {
 /// Uses rolling hash to efficiently compute k-mer hashes.
 /// Windows are adjacent starting from position 0, focusing on the most reliable
 /// portion of the read (quality typically degrades toward the end).
-fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
+fn extract_minimizers(seq: &str, params: &MinimizerParams) -> SmallVec<[u64; 8]> {
     let seq_bytes = seq.as_bytes();
     let seq_len = seq_bytes.len();
 
     if seq_len < params.kmer_len {
-        return vec![];
+        return SmallVec::new();
     }
 
     // Mask to keep only the rightmost k*2 bits (each base uses 2 bits)
@@ -134,7 +135,7 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> Vec<u64> {
         (1u64 << (2 * params.kmer_len)) - 1
     };
 
-    let mut minimizers = Vec::with_capacity(params.num_windows);
+    let mut minimizers = SmallVec::with_capacity(params.num_windows);
 
 
     // Use adjacent windows starting from the beginning of the read
@@ -358,13 +359,14 @@ impl DedupContext {
 
         // Track which candidates we've already checked to avoid redundant comparisons
         // (same candidate can appear in multiple buckets if it shares multiple minimizers)
-        let mut checked_ids = AHashSet::new();
+        // Use &String references to avoid cloning IDs
+        let mut checked_ids: AHashSet<&String> = AHashSet::new();
         let mut matching_cluster_id: Option<String> = None;
 
         'outer: for &min_hash in &all_mins {
             if let Some(bucket_reads) = self.buckets.get(&min_hash) {
                 for candidate_id in bucket_reads {
-                    if !checked_ids.insert(candidate_id.clone()) {
+                    if !checked_ids.insert(candidate_id) {
                         continue;  // Already checked this candidate
                     }
 
