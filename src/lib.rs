@@ -104,14 +104,29 @@ impl ReadPair {
 // This allows fast rolling hash computation and comparison.
 // ============================================================================
 
+// Lookup table for base encoding (faster than match statement)
+// Maps ASCII byte values to 2-bit encodings: A/a=0, C/c=1, G/g=2, T/t=3
+// Invalid bases (including N) are marked with u64::MAX
+const ENCODE_LOOKUP: [u64; 256] = {
+    let mut table = [u64::MAX; 256];
+    table[b'A' as usize] = 0;
+    table[b'a' as usize] = 0;
+    table[b'C' as usize] = 1;
+    table[b'c' as usize] = 1;
+    table[b'G' as usize] = 2;
+    table[b'g' as usize] = 2;
+    table[b'T' as usize] = 3;
+    table[b't' as usize] = 3;
+    table
+};
+
 #[inline(always)]
 fn encode_base(b: u8) -> Option<u64> {
-    match b {
-        b'A' | b'a' => Some(0),
-        b'C' | b'c' => Some(1),
-        b'G' | b'g' => Some(2),
-        b'T' | b't' => Some(3),
-        _ => None,  // N and other ambiguous bases: skip this k-mer
+    let encoded = ENCODE_LOOKUP[b as usize];
+    if encoded == u64::MAX {
+        None
+    } else {
+        Some(encoded)
     }
 }
 
