@@ -105,6 +105,40 @@ struct StoredExemplar {
     rev_seq: String,
 }
 
+/// ID registry for interning read IDs to compact u32 indices.
+/// Dramatically reduces memory usage and improves hash/comparison performance.
+struct IDRegistry {
+    id_to_index: AHashMap<String, u32>,
+    index_to_id: Vec<String>,
+}
+
+impl IDRegistry {
+    fn new() -> Self {
+        Self {
+            id_to_index: AHashMap::new(),
+            index_to_id: Vec::new(),
+        }
+    }
+
+    /// Get or create an index for a read ID
+    fn get_or_create(&mut self, id: String) -> u32 {
+        if let Some(&idx) = self.id_to_index.get(&id) {
+            idx
+        } else {
+            let idx = self.index_to_id.len() as u32;
+            self.index_to_id.push(id.clone());
+            self.id_to_index.insert(id, idx);
+            idx
+        }
+    }
+
+    /// Convert index back to read ID
+    #[inline]
+    fn get_id(&self, idx: u32) -> &str {
+        &self.index_to_id[idx as usize]
+    }
+}
+
 // ============================================================================
 // Minimizer Extraction
 //
@@ -316,7 +350,7 @@ fn reads_are_similar(
 
 #[derive(Debug, Clone)]
 struct ClusterStats {
-    best_read_id: String,  // Can change as we see better reads
+    best_read_idx: u32,  // Index of best read (can change as we see better reads)
     best_score: f64,
     count: usize,
 }
@@ -325,23 +359,24 @@ pub struct DedupContext {
     dedup_params: DedupParams,
     minimizer_params: MinimizerParams,
 
+    // ID interning: read IDs -> compact u32 indices for faster hashing/comparison
+    id_registry: IDRegistry,
+
     // HashMap choices:
-    // - FxHashMap for minimizer buckets: u64 keys are well-distributed
+    // - FxHashMap for integer keys: u64/u32 keys are well-distributed
     //   integers, so we can use the ultra-fast FxHash (just a multiply + XOR)
-    // - AHashMap for String keys: much faster than std HashMap (which uses
-    //   cryptographic SipHash), and we don't need DOS protection
 
-    // minimizer -> list of cluster IDs
-    buckets: FxHashMap<u64, Vec<String>>,
+    // minimizer -> list of read indices (instead of read IDs)
+    buckets: FxHashMap<u64, Vec<u32>>,
 
-    // exemplarID -> read sequences (quality strings omitted to save memory)
-    exemplar_store: AHashMap<String, StoredExemplar>,
+    // read_idx -> read sequences (only for exemplars, quality strings omitted)
+    exemplar_store: Vec<Option<StoredExemplar>>,
 
-    // read_id -> cluster_id (grows linearly with total reads)
-    results: AHashMap<String, String>,
+    // read_idx -> cluster_leader_idx (grows linearly with total reads)
+    results: Vec<u32>,
 
-    // cluster_id -> ClusterStats
-    clusters: AHashMap<String, ClusterStats>,
+    // cluster_leader_idx -> ClusterStats
+    clusters: FxHashMap<u32, ClusterStats>,
 
     finalized: bool,
 }
@@ -351,10 +386,11 @@ impl DedupContext {
         Self {
             dedup_params,
             minimizer_params,
+            id_registry: IDRegistry::new(),
             buckets: FxHashMap::default(),
-            exemplar_store: AHashMap::new(),
-            results: AHashMap::new(),
-            clusters: AHashMap::new(),
+            exemplar_store: Vec::new(),
+            results: Vec::new(),
+            clusters: FxHashMap::default(),
             finalized: false,
         }
     }
@@ -364,10 +400,11 @@ impl DedupContext {
     /// Algorithm:
     /// 1. Extract minimizers and look up matching exemplars in buckets
     /// 2. Compare this read against candidates until we find a match
-    /// 3a. If match found: add to existing cluster, potentially updating best_read_id
+    /// 3a. If match found: add to existing cluster, potentially updating best_read_idx
     /// 3b. If no match: create new cluster with this read as initial exemplar
     pub fn process_read(&mut self, read_pair: ReadPair) -> String {
-        let read_id = read_pair.read_id.clone();
+        // Intern the read ID to a compact u32 index
+        let read_idx = self.id_registry.get_or_create(read_pair.read_id.clone());
         let mean_q = read_pair.mean_quality();
 
         // Calculate score: quality is primary (scaled by 1000), length is secondary
@@ -380,26 +417,25 @@ impl DedupContext {
         let mut all_mins = fwd_mins;
         all_mins.extend(rev_mins);
 
-        // Track which candidates we've already checked to avoid redundant comparisons
-        // (same candidate can appear in multiple buckets if it shares multiple minimizers)
-        // Use &String references to avoid cloning IDs
-        let mut checked_ids: AHashSet<&String> = AHashSet::new();
-        let mut matching_cluster_id: Option<String> = None;
+        // Track which candidates we've already checked
+        let mut checked_indices = AHashSet::new();
+        let mut matching_cluster_idx: Option<u32> = None;
 
         'outer: for &min_hash in &all_mins {
             if let Some(bucket_reads) = self.buckets.get(&min_hash) {
-                for candidate_id in bucket_reads {
-                    if !checked_ids.insert(candidate_id) {
+                for &candidate_idx in bucket_reads {
+                    if !checked_indices.insert(candidate_idx) {
                         continue;  // Already checked this candidate
                     }
 
-                    if let Some(candidate) = self.exemplar_store.get(candidate_id) {
+                    if let Some(candidate) = self.exemplar_store.get(candidate_idx as usize).and_then(|opt| opt.as_ref()) {
                         if reads_are_similar(&read_pair, candidate, &self.dedup_params) {
-                            let candidate_cluster_id = self.results.get(candidate_id)
-                                .cloned()
-                                .unwrap_or_else(|| candidate_id.clone());
+                            // Find the cluster leader for this candidate
+                            let candidate_cluster_idx = self.results.get(candidate_idx as usize)
+                                .copied()
+                                .unwrap_or(candidate_idx);
 
-                            matching_cluster_id = Some(candidate_cluster_id);
+                            matching_cluster_idx = Some(candidate_cluster_idx);
                             break 'outer;
                         }
                     }
@@ -407,73 +443,84 @@ impl DedupContext {
             }
         }
 
-        let cluster_id = if let Some(cluster_id) = matching_cluster_id {
+        let cluster_leader_idx = if let Some(cluster_idx) = matching_cluster_idx {
             // Found a match - add to existing cluster
-            if let Some(cluster) = self.clusters.get_mut(&cluster_id) {
+            if let Some(cluster) = self.clusters.get_mut(&cluster_idx) {
                 cluster.count += 1;
                 // Update best read if this one is better
                 if score > cluster.best_score {
-                    cluster.best_read_id = read_id.clone();
+                    cluster.best_read_idx = read_idx;
                     cluster.best_score = score;
                 }
             }
-            cluster_id
+            cluster_idx
         } else {
-            // New unique sequence - create new cluster
+            // New unique sequence - create new cluster with this read as leader
             self.clusters.insert(
-                read_id.clone(),
+                read_idx,
                 ClusterStats {
-                    best_read_id: read_id.clone(),
+                    best_read_idx: read_idx,
                     best_score: score,
                     count: 1,
                 },
             );
 
+            // Ensure exemplar_store has space for this index
+            if self.exemplar_store.len() <= read_idx as usize {
+                self.exemplar_store.resize(read_idx as usize + 1, None);
+            }
+
             // Store only sequences (not quality strings) to reduce memory footprint
-            self.exemplar_store.insert(read_id.clone(), StoredExemplar {
+            self.exemplar_store[read_idx as usize] = Some(StoredExemplar {
                 fwd_seq: read_pair.fwd_seq,
                 rev_seq: read_pair.rev_seq,
             });
 
             // Add read to minimizer buckets (only for new exemplars)
             for &min_hash in &all_mins {
-                self.buckets.entry(min_hash).or_insert_with(Vec::new).push(read_id.clone());
+                self.buckets.entry(min_hash).or_insert_with(Vec::new).push(read_idx);
             }
 
-            read_id.clone()
+            read_idx
         };
 
-        self.results.insert(read_id.clone(), cluster_id.clone());
+        // Track this read's cluster assignment
+        if self.results.len() <= read_idx as usize {
+            self.results.resize(read_idx as usize + 1, 0);
+        }
+        self.results[read_idx as usize] = cluster_leader_idx;
 
-        cluster_id
+        // Return the cluster leader's ID (as a String)
+        self.id_registry.get_id(cluster_leader_idx).to_string()
     }
 
-    /// Finalize results: resolve all reads to their cluster's best_read_id.
+    /// Finalize results: resolve all reads to their cluster's best_read_idx.
     ///
-    /// During streaming, reads point to the cluster key (first exemplar).
+    /// During streaming, reads point to the cluster leader index (first exemplar).
     /// After finalization, they point to the best exemplar found for that cluster.
     pub fn finalize(&mut self) {
-        let mut final_results = AHashMap::with_capacity(self.results.len());
-
-        for (read_id, cluster_key) in &self.results {
-            let final_exemplar_id = self.clusters
-                .get(cluster_key)
-                .map(|c| c.best_read_id.clone())
-                .unwrap_or_else(|| cluster_key.clone());
-            final_results.insert(read_id.clone(), final_exemplar_id);
+        // Update each read's cluster assignment to point to the best exemplar
+        for read_idx in 0..self.results.len() {
+            let cluster_leader_idx = self.results[read_idx];
+            if let Some(cluster) = self.clusters.get(&cluster_leader_idx) {
+                self.results[read_idx] = cluster.best_read_idx;
+            }
         }
 
-        self.results = final_results;
         self.finalized = true;
 
+        // Free memory for intermediate data structures
         self.buckets.clear();
         self.exemplar_store.clear();
     }
 
     pub fn get_cluster_id(&self, read_id: &str) -> String {
-        self.results.get(read_id)
-            .cloned()
-            .unwrap_or_else(|| read_id.to_string())
+        if let Some(&read_idx) = self.id_registry.id_to_index.get(read_id) {
+            if let Some(&cluster_idx) = self.results.get(read_idx as usize) {
+                return self.id_registry.get_id(cluster_idx).to_string();
+            }
+        }
+        read_id.to_string()
     }
 
     pub fn stats(&self) -> (usize, usize) {
@@ -503,5 +550,14 @@ pub fn deduplicate_read_pairs(
 
     ctx.finalize();
 
-    ctx.results
+    // Convert internal index-based results to HashMap<String, String> for public API
+    let mut result_map = AHashMap::with_capacity(ctx.results.len());
+    for read_idx in 0..ctx.results.len() {
+        let cluster_idx = ctx.results[read_idx];
+        let read_id = ctx.id_registry.get_id(read_idx as u32);
+        let cluster_id = ctx.id_registry.get_id(cluster_idx);
+        result_map.insert(read_id.to_string(), cluster_id.to_string());
+    }
+
+    result_map
 }
