@@ -245,9 +245,10 @@ def _read_pairs_equivalent(rp1: ReadPair, rp2: ReadPair, params: DedupParams) ->
     """
     Test if two read pairs are equivalent (duplicates).
 
-    In strict mode: Only checks standard orientation (F1, R1) vs (F2, R2)
-    In tolerant mode: Also checks RC-swapped orientation (F1, R1) vs (RC(R2), RC(F2))
-      which represents the same DNA fragment sequenced from the opposite strand
+    In strict mode: Only checks standard orientation (Fwd1, Rev1) vs (Fwd2, Rev2).
+    In tolerant mode: Also checks for a mate-pair swap by comparing (Fwd1, Rev1)
+    against (Rev2, Fwd2). This handles cases where adapters attach in opposite
+    orientations, causing the forward and reverse reads to be swapped.
     """
     # Always check standard orientation
     if _sequences_match(rp1.fwd_seq, rp2.fwd_seq, params) and _sequences_match(
@@ -258,8 +259,9 @@ def _read_pairs_equivalent(rp1: ReadPair, rp2: ReadPair, params: DedupParams) ->
     # In tolerant mode, check swapped orientation
     if params.orientation == ORIENT_TOLERANT:
         # Swapped orientation: (fwd, rev) matches (rev, fwd)
-        # This handles the case where adapters attached in the opposite orientation,
-        # causing the same DNA fragment to be sequenced with forward/reverse swapped
+        # This handles the case where adapters attached in the opposite
+        # orientation, causing the same DNA fragment to be sequenced with
+        # forward/reverse swapped
         if _sequences_match(rp1.fwd_seq, rp2.rev_seq, params) and _sequences_match(
             rp1.rev_seq, rp2.fwd_seq, params
         ):
