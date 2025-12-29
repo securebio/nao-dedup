@@ -397,6 +397,14 @@ class TestParameterValidation:
         assert params1.orientation == ORIENT_STRICT
         assert params2.orientation == ORIENT_TOLERANT
 
+
+# ============================================================================
+# Rust-Specific Tests
+# ============================================================================
+
+class TestRustSpecific:
+    """Tests specific to the Rust implementation."""
+
     def test_rust_kmer_len_validation(self):
         """Test that Rust validates kmer_len <= 32."""
         from nao_dedup_rust import deduplicate_read_pairs_rust
@@ -408,8 +416,6 @@ class TestParameterValidation:
         params = MinimizerParams(kmer_len=33, window_len=50, num_windows=3)
         with pytest.raises(ValueError, match="k-mer length must be <= 32"):
             deduplicate_read_pairs_rust([rp], minimizer_params=params)
-
-
 
 
 # ============================================================================
