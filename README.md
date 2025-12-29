@@ -251,16 +251,17 @@ ensuring they won't be selected as minimizers.
 
 #### Window Placement
 
-Windows are placed adjacently starting from the beginning of each read (positions 0, window_len, 2×window_len, etc.). This strategy:
-- Aligns with standard NGS duplicate detection based on 5' mapping coordinates
+Windows are placed adjacently starting from the beginning of each read
+(positions 0, window_len, 2×window_len, etc.). This strategy:
 - Focuses on the most stable region of reads (the beginning)
-- Avoids the tail region, which is most likely to be trimmed or contain sequencing errors
+- Avoids the tail region, which is most likely to be trimmed or contain
+  sequencing errors
 
 For example, with 3 windows of 25bp on a 150bp read:
-- Window 0: positions [0-25]
-- Window 1: positions [25-50]
-- Window 2: positions [50-75]
-- Positions 75-150 are not examined for minimizers
+- Window 0: positions [0, 25)
+- Window 1: positions [25, 50)
+- Window 2: positions [50, 75)
+- Positions [75, 150) are not examined for minimizers
 
 ### 2. Bucketing
 
