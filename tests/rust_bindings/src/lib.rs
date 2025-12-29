@@ -1,6 +1,5 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use std::collections::HashMap;
 
 use nao_dedup::{deduplicate_read_pairs, DedupParams, MinimizerParams, ReadPair};
 
@@ -64,11 +63,10 @@ fn deduplicate_read_pairs_rust(
         let kmer_len: usize = params.getattr("kmer_len")?.extract()?;
         let window_len: usize = params.getattr("window_len")?.extract()?;
         let num_windows: usize = params.getattr("num_windows")?.extract()?;
-        Some(MinimizerParams {
-            kmer_len,
-            window_len,
-            num_windows,
-        })
+        Some(
+            MinimizerParams::new(kmer_len, window_len, num_windows)
+                .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?
+        )
     } else {
         None
     };
@@ -81,8 +79,7 @@ fn deduplicate_read_pairs_rust(
     }
 
     // Run deduplication
-    let result: HashMap<String, String> =
-        deduplicate_read_pairs(rust_read_pairs, rust_dedup_params, rust_minimizer_params);
+    let result = deduplicate_read_pairs(rust_read_pairs, rust_dedup_params, rust_minimizer_params);
 
     // Convert result to Python dict
     let py_dict = PyDict::new_bound(py);

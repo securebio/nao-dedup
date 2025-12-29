@@ -53,6 +53,23 @@ pip install -r requirements.txt
 
 ### Usage
 
+#### Choosing an Algorithm
+
+The Python implementation of `nao-dedup` provides two deduplication algorithms:
+
+1. **`deduplicate_read_pairs()`** - Graph-based algorithm
+   - **Best for**: Small to medium datasets (< 100k reads)
+   - **Advantages**: Uses graph centrality to select optimal exemplars
+   - **Memory usage**: Stores all reads in memory (~3GB for 250k reads)
+
+2. **`deduplicate_read_pairs_streaming()`** - Streaming two-pass algorithm
+   - **Best for**: Large datasets (> 100k reads)
+   - **Advantages**: Only stores unique sequences in memory (~2-3x less memory
+     in the typical case, far more on pathological datasets)
+   - **Memory usage**: Much lower (~1GB for 250k reads with 75k unique)
+   - **Quality**: Still selects high-quality representatives based on length
+     and quality
+
 #### Basic Example
 
 ```python
@@ -113,8 +130,8 @@ result = deduplicate_read_pairs(
   still be considered a duplicate
 - `max_error_frac` (default: 0.01): Maximum fraction of mismatches allowed
   (errors/overlap length)
-- `orientation` (default: "tolerant"): Either `ORIENT_STRICT` (F-R must match
-  F-R) or `ORIENT_TOLERANT` (also allows F-R to match R-F)
+- `orientation` (default: `ORIENT_TOLERANT`): Either `ORIENT_STRICT` (F-R must
+  match F-R) or `ORIENT_TOLERANT` (also allows F-R to match R-F)
 
 #### MinimizerParams
 
@@ -144,7 +161,7 @@ reduce memory usage and comparisons.
 The Rust library is designed as a stateful context that processes reads in two
 passes:
 
-#### Pass 1: Build Index
+#### Pass 1: Process Reads
 
 ```rust
 use nao_dedup::{DedupContext, DedupParams, MinimizerParams, ReadPair};
@@ -163,17 +180,21 @@ let read_pair = ReadPair {
     rev_qual: "IIIIIIII".to_string(),
 };
 ctx.process_read(read_pair);
+```
 
+#### Pass 2: Finalize
+
+```rust
 // Finalize to build final exemplar mappings
 ctx.finalize();
 ```
 
-#### Pass 2: Query Results
+#### Query Results
 
 ```rust
-// After finalization, query final exemplars
-let exemplar = ctx.get_final_exemplar("read1");
-println!("read1 -> {}", exemplar);
+// After finalization, query cluster IDs
+let cluster_id = ctx.get_cluster_id("read1");
+println!("read1 -> {}", cluster_id);
 
 // Get statistics
 let (total_processed, unique_clusters) = ctx.stats();
@@ -193,6 +214,10 @@ integrate this library with TSV file I/O.
 
 We balance memory and speed, storing only exemplar reads rather than the entire
 dataset.
+
+Note that this is single-threaded performance.  We ought to be able to do even
+better with more cores, though in practice we just mark duplicates on multiple
+files in parallel.
 
 ### Building
 
@@ -272,10 +297,11 @@ Each read is divided into windows, and the lexicographically smallest k-mer
 (minimizer) is extracted from each window. This creates a signature for each
 read pair.
 
-#### K-mer Hashing
+#### K-mer Encoding
 
-K-mers are hashed using a 2-bit DNA encoding (A=0, C=1, G=2, T=3) that encodes
-each base into exactly 2 bits. This provides several advantages:
+K-mers are encoded using a 2-bit DNA encoding (A=0, C=1, G=2, T=3) that
+represents each base with exactly 2 bits. This provides several advantages when
+used as a hash key:
 
 - **Fast**: Just bit shifts and ORs, much faster than CRC32 or polynomial hashing
 - **No collisions**: Bijective mapping for k-mers up to length 32 (fits in 64 bits)
@@ -285,10 +311,39 @@ each base into exactly 2 bits. This provides several advantages:
 K-mers containing non-ACGT bases (primarily N) return a sentinel value,
 ensuring they won't be selected as minimizers.
 
+#### Window Placement
+
+Windows are placed adjacently starting from the beginning of each read
+(positions 0, window_len, 2×window_len, etc.). This strategy:
+- Focuses on the most stable region of reads (the beginning)
+- Avoids the tail region, which is most likely to be trimmed or contain
+  sequencing errors
+
+For example, with 3 windows of 25bp on a 150bp read:
+- Window 0: positions [0, 25)
+- Window 1: positions [25, 50)
+- Window 2: positions [50, 75)
+- Positions [75, 150) are not examined for minimizers
+
 ### 2. Bucketing
 
 Read pairs with matching minimizers are assigned to the same buckets. This
 dramatically reduces the number of pairwise comparisons needed.
+
+**Python graph-based**:
+- All reads are assigned to buckets up front using tuple keys `(fwd_hash, rev_hash)`
+- Generates n² bucket keys per read (all combinations of forward and reverse minimizers)
+- Each read appears in multiple buckets
+- More precise bucketing with fewer collisions
+- Stores all reads in memory
+
+**Rust and Python streaming**:
+- Reads are processed one at a time
+- Uses individual minimizer hashes as keys (not tuples)
+- Generates 2n keys per read (just the minimizers from forward and reverse reads)
+- Simpler bucketing trades precision for memory efficiency
+- More bucket collisions are acceptable since full sequence comparison happens anyway
+- Only stores unique exemplars, not all reads
 
 ### 3. Pairwise Comparison
 
@@ -299,7 +354,7 @@ duplicates. Comparison allows for:
 - Mate-pair orientation swaps (always enabled in Rust; configurable via
   `orientation` in Python)
 
-### 4. Clustering (Python graph-based) or Streaming (Rust and Python streaming)
+### 4. Clustering
 
 **Python graph-based**:
 - An equivalence graph is built where nodes are read pairs and edges connect
@@ -310,9 +365,11 @@ duplicates. Comparison allows for:
 
 **Rust and Python streaming**:
 - No graph construction - purely streaming approach
-- First matching read in a bucket becomes the cluster exemplar
-- Subsequent matches are assigned to that exemplar
-- Two-pass algorithm: Pass 1 builds index, Pass 2 queries final exemplars
+- First read in a cluster identifies that cluster (becomes the cluster ID)
+- As reads are processed, the best read (by quality and length) becomes the exemplar
+- Subsequent reads matching the cluster are compared against the current exemplar
+- If a better read is found, it replaces the previous exemplar
+- Two-pass algorithm: Pass 1 processes reads and builds index, Pass 2 finalizes exemplar mappings
 
 ### 5. Exemplar Selection
 
@@ -323,8 +380,9 @@ duplicates. Comparison allows for:
 4. Read ID (lexicographic tie-breaker)
 
 **Rust/Python streaming** selects based on:
-1. First match in bucket (becomes exemplar)
-2. Quality score for tie-breaking when applicable
+1. Mean quality score (higher is better)
+2. Total read length (longer is better)
+3. First read in cluster serves as tie-breaker
 
 ## Development Setup
 
@@ -340,7 +398,7 @@ On Linux:
 # Ubuntu/Debian
 sudo apt install rustc cargo
 
-# Fedora
+# Redhat derived distributions (Fedora, Amazon Linux 2023, etc)
 sudo dnf install rust cargo
 ```
 
