@@ -813,7 +813,12 @@ class TestDeduplication:
         Edge case: When a window has all N's (or enough N's that no valid k-mer
         can be formed), Python's _extract_minimizer returns EMPTY_KMER_SENTINEL_HASH
         while Rust's extract_minimizers skips the window (doesn't add to vector).
-        Both should produce the same clustering behavior.
+
+        Both produce the same clustering behavior in this test because the reads
+        share valid minimizers in other windows. However, in pathological cases
+        where reads ONLY share N-windows (no valid minimizers in common), Python
+        would cluster them (via shared sentinel bucket keys) while Rust would not
+        (no bucket keys in common). This is an acceptable edge case difference.
         """
         # With default params: num_windows=3/4, window_len=25
         # Create sequences where middle window is all N's
@@ -834,9 +839,12 @@ class TestDeduplication:
         """
         Test sequences where ALL windows contain only N's.
 
-        Edge case: Graph and streaming behave differently for all-N reads:
-        - Graph: All-N reads share bucket (-1,-1) so they cluster together
-        - Streaming: All-N reads have no minimizers so each is separate
+        Edge case: Implementations behave differently for all-N reads:
+        - Graph: All-N reads share bucket keys (with sentinel values) so they
+          cluster together
+        - Python streaming and Rust: All-N reads produce no valid comparisons,
+          so each is separate. (Python creates sentinel bucket keys but the
+          streaming algorithm filters them out; Rust skips N-windows entirely.)
         """
         # Create a sequence of all N's
         all_ns = "N" * 150
@@ -855,11 +863,11 @@ class TestDeduplication:
         assert mapping["r3"] == "r3"
 
         # All-N reads behave differently:
-        if dedup_func == deduplicate_read_pairs:  # graph
-            # Graph: all-N reads share bucket, so they cluster together
+        if dedup_func == deduplicate_read_pairs:  # graph only
+            # Graph: all-N reads share bucket keys, so they cluster together
             assert mapping["r1"] == mapping["r2"], "Graph should cluster all-N reads"
-        else:  # streaming (Python or Rust)
-            # Streaming: no minimizers means each is separate
+        else:  # Python streaming and Rust
+            # Both produce no valid comparisons for all-N reads
             assert mapping["r1"] == "r1", "r1 should be its own exemplar"
             assert mapping["r2"] == "r2", "r2 should be its own exemplar"
 
