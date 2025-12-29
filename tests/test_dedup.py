@@ -894,7 +894,7 @@ class TestDeduplication:
         """
         # Create a 150bp "insert" - this represents the actual DNA fragment
         # Use a pattern that's clearly directional (not palindromic)
-        insert_top = "GATTACA" * 20 + "ACATAG" * 5  # 150bp total
+        insert_top = "GATTACA" * 21 + "GAT"  # 150bp total
         insert_bottom = _reverse_complement(insert_top)
 
         qual = "I" * 150
