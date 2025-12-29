@@ -11,7 +11,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field, InitVar
 from itertools import combinations
 from typing import Literal, Optional
-from zlib import crc32
 
 import networkx as nx
 
@@ -19,7 +18,7 @@ import networkx as nx
 # - Don't need any Bio machinery
 # - Python string operations are faster than the corresponding Seq operations
 
-EMPTY_KMER_SENTINEL_HASH = -1  # crc32 returns nonnegative integers, no collision
+EMPTY_KMER_SENTINEL_HASH = -1  # k-mer encoding returns nonnegative integers, no collision
 HashPair = tuple[int, int]  # hash from fwd mate, hash from rev mate
 
 ORIENT_STRICT = "strict"
@@ -39,7 +38,12 @@ class DedupParams:
 
 @dataclass
 class MinimizerParams:
-    """Minimizer configuration (rarely needs changing)."""
+    """Minimizer configuration (rarely needs changing).
+
+    Note: These defaults (kmer_len=7, num_windows=3) differ from Rust
+    (kmer_len=15, num_windows=4) because Rust is expected to handle much larger
+    inputs where more selective minimizers reduce memory usage and comparisons.
+    """
 
     num_windows: int = 3  # Number of windows per read
     window_len: int = 25  # Base pairs per window
@@ -97,21 +101,44 @@ def _reverse_complement(seq: str) -> str:
     return seq.translate(_COMPLEMENT)[::-1]
 
 
-def _canonical_kmer(kmer: str) -> str:
-    """Return lexicographically smaller of kmer and its reverse complement."""
-    rc = _reverse_complement(kmer)
-    return min(kmer, rc)
-
-
 def _hash_kmer(kmer: str) -> int:
-    """Hash a kmer to an int. The actual hash used is an implementation detail,
-    but the result must be stable run-to-run (so no default Python hash)."""
-    return crc32(kmer.encode())
+    """Hash a kmer to an int using 2-bit encoding (A=0, C=1, G=2, T=3).
+
+    K-mers with non-ACGT bases (N, etc.) return the maximum possible hash value,
+    ensuring they won't be selected as minimizers.
+
+    This particular implementation is bit-packing which is very technically not
+    a hash since its invertable (assuming all ACTG).  But that just makes it a
+    very good hash function for our purposes!
+
+    To make the Rust code fast we use a custom hash there, and then we use it
+    here as well because we're keeping Python and Rust in sync.  This is fine
+    for streaming (where we'll use Rust where speed counts) but likely slows
+    down the graph algorithm relative to using a crc32 or some other fast hash
+    that Python has a C implementation for.  If the graph version ends up too
+    slow, consider switching to crc32 just for Python's graph version.
+    """
+    x = 0
+    for b in kmer:
+        if b in 'Aa':
+            v = 0
+        elif b in 'Cc':
+            v = 1
+        elif b in 'Gg':
+            v = 2
+        elif b in 'Tt':
+            v = 3
+        else:
+            return 2**64 - 1  # max hash; won't be selected as minimizer
+        x = (x << 2) | v
+    return x
 
 
 def _extract_minimizer(seq: str, window_idx: int, params: MinimizerParams) -> int:
     """
     Extract the minimizer hash from a specific window of the sequence.
+
+    Returns the smallest hash found in the window (the minimizer).
 
     Args:
         seq: DNA sequence
@@ -119,7 +146,7 @@ def _extract_minimizer(seq: str, window_idx: int, params: MinimizerParams) -> in
         params: Minimizer parameters
 
     Returns:
-        Hash of the lexicographically smallest canonical k-mer in the window
+        Minimum hash in the window
     """
     start = window_idx * params.window_len
     end = min(len(seq), start + params.window_len)
@@ -133,11 +160,7 @@ def _extract_minimizer(seq: str, window_idx: int, params: MinimizerParams) -> in
     min_hash = bigger_than_hash
     for i in range(start, end - params.kmer_len + 1):
         kmer = seq[i : i + params.kmer_len]
-        if "N" not in kmer:  # Skip k-mers with ambiguous bases
-            canonical = _canonical_kmer(kmer)
-            h = _hash_kmer(canonical)
-            if h < min_hash:
-                min_hash = h
+        min_hash = min(_hash_kmer(kmer), min_hash)
 
     return min_hash if min_hash != bigger_than_hash else EMPTY_KMER_SENTINEL_HASH
 
@@ -222,8 +245,10 @@ def _read_pairs_equivalent(rp1: ReadPair, rp2: ReadPair, params: DedupParams) ->
     """
     Test if two read pairs are equivalent (duplicates).
 
-    In strict mode: F1-R1 must match F2-R2
-    In tolerant mode: Also checks F1-R1 against R2-F2 (swapped orientation)
+    In strict mode: Only checks standard orientation (Fwd1, Rev1) vs (Fwd2, Rev2).
+    In tolerant mode: Also checks for a mate-pair swap by comparing (Fwd1, Rev1)
+    against (Rev2, Fwd2). This handles cases where adapters attach in opposite
+    orientations, causing the forward and reverse reads to be swapped.
     """
     # Always check standard orientation
     if _sequences_match(rp1.fwd_seq, rp2.fwd_seq, params) and _sequences_match(
@@ -231,8 +256,12 @@ def _read_pairs_equivalent(rp1: ReadPair, rp2: ReadPair, params: DedupParams) ->
     ):
         return True
 
-    # In tolerant mode, also check swapped orientation
+    # In tolerant mode, check swapped orientation
     if params.orientation == ORIENT_TOLERANT:
+        # Swapped orientation: (fwd, rev) matches (rev, fwd)
+        # This handles the case where adapters attached in the opposite
+        # orientation, causing the same DNA fragment to be sequenced with
+        # forward/reverse swapped
         if _sequences_match(rp1.fwd_seq, rp2.rev_seq, params) and _sequences_match(
             rp1.rev_seq, rp2.fwd_seq, params
         ):
@@ -391,7 +420,7 @@ class ClusterStats:
     count: int = 1
 
 
-def _get_stable_keys(rp: ReadPair, params: MinimizerParams) -> set[int]:
+def _get_stable_keys(rp: ReadPair, params: MinimizerParams) -> list[int]:
     """
     Extract minimizer keys from multiple windows to ensure we find matches
     even if the read has errors at the edges.
@@ -410,18 +439,20 @@ def _get_stable_keys(rp: ReadPair, params: MinimizerParams) -> set[int]:
         params: Minimizer parameters
 
     Returns:
-        Set of minimizer hashes
+        List of minimizer hashes in deterministic order (window 0 fwd, window 0 rev,
+        window 1 fwd, ...). May contain duplicates if the same minimizer appears in
+        multiple windows, but checked_ids prevents redundant comparisons.
     """
-    keys = set()
+    keys = []
     for i in range(params.num_windows):
         # Check both Fwd and Rev hashes for maximum tolerance
         k_fwd = _extract_minimizer(rp.fwd_seq, i, params)
         k_rev = _extract_minimizer(rp.rev_seq, i, params)
 
         if k_fwd != EMPTY_KMER_SENTINEL_HASH:
-            keys.add(k_fwd)
+            keys.append(k_fwd)
         if k_rev != EMPTY_KMER_SENTINEL_HASH:
-            keys.add(k_rev)
+            keys.append(k_rev)
 
     return keys
 
@@ -446,7 +477,7 @@ def _calculate_score(rp: ReadPair) -> float:
 
 def _find_matching_exemplar(
     rp: ReadPair,
-    keys: set[int],
+    keys: list[int],
     exemplar_db: dict[int, list[Exemplar]],
     dedup_params: DedupParams
 ) -> Optional[str]:
@@ -455,7 +486,7 @@ def _find_matching_exemplar(
 
     Args:
         rp: ReadPair to match
-        keys: Set of minimizer keys for this read
+        keys: List of minimizer keys for this read (in deterministic order)
         exemplar_db: Database of exemplars indexed by minimizer hash
         dedup_params: Deduplication parameters
 
@@ -476,8 +507,10 @@ def _find_matching_exemplar(
                     _sequences_match(rp.rev_seq, exemplar.rev_seq, dedup_params)):
                     return exemplar.read_id
 
-                # Check swapped orientation if in tolerant mode
+                # In tolerant mode, check swapped orientation
                 if dedup_params.orientation == ORIENT_TOLERANT:
+                    # Swapped orientation: (fwd, rev) matches (rev, fwd)
+                    # This handles the case where adapters attached in the opposite orientation
                     if (_sequences_match(rp.fwd_seq, exemplar.rev_seq, dedup_params) and
                         _sequences_match(rp.rev_seq, exemplar.fwd_seq, dedup_params)):
                         return exemplar.read_id
@@ -504,7 +537,7 @@ def deduplicate_read_pairs_streaming(
         read_pairs: Iterable of ReadPair objects to deduplicate
         dedup_params: Parameters controlling deduplication behavior
         minimizer_params: Parameters for minimizer extraction
-        verbose: Print some debug info
+        verbose: If True, print statistics about deduplication
 
     Returns:
         Dict mapping read_id to exemplar_id
@@ -577,8 +610,6 @@ def deduplicate_read_pairs_streaming(
     if verbose:
         n_reads = len(final_mapping)
         n_clusters = len(cluster_leaders)
-        print(
-            f"Deduplication: {n_reads} reads, {n_clusters} clusters"
-        )
+        print(f"Streaming dedup: {n_reads} reads -> {n_clusters} clusters")
 
     return final_mapping
