@@ -91,6 +91,50 @@ fn read_fastq_record<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Fastq
     }))
 }
 
+/// Iterator that yields pairs of FASTQ records from an interleaved FASTQ file.
+struct FastqPairIterator<R: BufRead> {
+    reader: R,
+    warned_odd: bool,
+}
+
+impl<R: BufRead> FastqPairIterator<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            warned_odd: false,
+        }
+    }
+}
+
+impl<R: BufRead> Iterator for FastqPairIterator<R> {
+    type Item = std::io::Result<(FastqRecord, FastqRecord)>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // Read R1
+        let r1 = match read_fastq_record(&mut self.reader) {
+            Ok(Some(record)) => record,
+            Ok(None) => return None, // EOF
+            Err(e) => return Some(Err(e)),
+        };
+
+        // Read R2
+        let r2 = match read_fastq_record(&mut self.reader) {
+            Ok(Some(record)) => record,
+            Ok(None) => {
+                // Odd number of reads - warn once and stop
+                if !self.warned_odd {
+                    eprintln!("Warning: Odd number of reads in file. Last read ignored.");
+                    self.warned_odd = true;
+                }
+                return None;
+            }
+            Err(e) => return Some(Err(e)),
+        };
+
+        Some(Ok((r1, r2)))
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -111,30 +155,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pass 1: Read all pairs and build deduplication index
     let input_file = File::open(&cli.input)?;
     let gz_decoder = GzDecoder::new(input_file);
-    let mut reader = BufReader::new(gz_decoder);
+    let reader = BufReader::new(gz_decoder);
+    let pair_iter = FastqPairIterator::new(reader);
 
     let mut ctx = DedupContext::new(dedup_params, minimizer_params);
     let mut pair_index = 0;
 
-    loop {
-        // Read R1
-        let r1 = match read_fastq_record(&mut reader)? {
-            Some(record) => record,
-            None => break,
-        };
-
-        // Read R2
-        let r2 = match read_fastq_record(&mut reader)? {
-            Some(record) => record,
-            None => {
-                eprintln!("Warning: Odd number of reads in file. Last read ignored.");
-                break;
-            }
-        };
+    for (idx, pair_result) in pair_iter.enumerate() {
+        let (r1, r2) = pair_result?;
 
         // Create ReadPair with index as ID
         let read_pair = ReadPair {
-            read_id: pair_index.to_string(),
+            read_id: idx.to_string(),
             fwd_seq: r1.sequence.trim().to_string(),
             rev_seq: r2.sequence.trim().to_string(),
             fwd_qual: r1.quality.trim().to_string(),
@@ -142,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         ctx.process_read(read_pair);
-        pair_index += 1;
+        pair_index = idx + 1;
 
         if pair_index % 100_000 == 0 {
             eprintln!("  Processed {} read pairs...", pair_index);
@@ -171,30 +203,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pass 2: Write exemplars
     let input_file = File::open(&cli.input)?;
     let gz_decoder = GzDecoder::new(input_file);
-    let mut reader = BufReader::new(gz_decoder);
+    let reader = BufReader::new(gz_decoder);
+    let pair_iter = FastqPairIterator::new(reader);
 
     let output_file = File::create(&cli.output)?;
     let gz_encoder = GzEncoder::new(output_file, Compression::default());
     let mut writer = BufWriter::new(gz_encoder);
 
-    let mut current_index = 0;
     let mut written = 0;
 
-    loop {
-        // Read R1
-        let r1 = match read_fastq_record(&mut reader)? {
-            Some(record) => record,
-            None => break,
-        };
-
-        // Read R2
-        let r2 = match read_fastq_record(&mut reader)? {
-            Some(record) => record,
-            None => break,
-        };
+    for (idx, pair_result) in pair_iter.enumerate() {
+        let (r1, r2) = pair_result?;
 
         // Write if this is an exemplar
-        if exemplar_indices.contains(&current_index) {
+        if exemplar_indices.contains(&idx) {
             write!(writer, "{}", r1.header)?;
             write!(writer, "{}", r1.sequence)?;
             write!(writer, "{}", r1.plus)?;
@@ -206,8 +228,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             written += 1;
         }
 
-        current_index += 1;
-
+        let current_index = idx + 1;
         if current_index % 100_000 == 0 {
             eprintln!("  Processed {} read pairs...", current_index);
         }
