@@ -523,6 +523,25 @@ impl DedupContext {
         let unique_clusters = self.clusters.len();
         (total_reads, unique_clusters)
     }
+
+    /// Get indices of all exemplar reads (the best read in each cluster).
+    ///
+    /// Must be called after finalize(). Returns a HashSet of read indices where
+    /// each index represents an exemplar (a read that is the best in its cluster).
+    ///
+    /// This is much more efficient than calling get_cluster_id in a loop, as it
+    /// uses direct integer comparisons on the internal results array.
+    pub fn get_exemplar_indices(&self) -> AHashSet<usize> {
+        let mut exemplars = AHashSet::with_capacity(self.clusters.len());
+        for read_idx in 0..self.results.len() {
+            let cluster_idx = self.results[read_idx];
+            // A read is an exemplar if it points to itself
+            if cluster_idx == read_idx as u32 {
+                exemplars.insert(read_idx);
+            }
+        }
+        exemplars
+    }
 }
 
 // ============================================================================

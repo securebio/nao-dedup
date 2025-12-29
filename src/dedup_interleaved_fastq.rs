@@ -3,7 +3,6 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use nao_dedup::{DedupContext, DedupParams, MinimizerParams, ReadPair};
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
@@ -165,13 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Build set of exemplar indices
-    let mut exemplar_indices = HashSet::new();
-    for i in 0..pair_index {
-        let exemplar = ctx.get_cluster_id(&i.to_string());
-        if exemplar == i.to_string() {
-            exemplar_indices.insert(i);
-        }
-    }
+    let exemplar_indices = ctx.get_exemplar_indices();
 
     eprintln!("Pass 2: Writing exemplars to output...");
 
