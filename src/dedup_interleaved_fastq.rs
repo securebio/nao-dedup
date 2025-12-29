@@ -58,6 +58,7 @@ fn read_fastq_record<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Fastq
     if reader.read_line(&mut header)? == 0 {
         return Ok(None);
     }
+    header.truncate(header.trim_end().len());
 
     // Read sequence
     if reader.read_line(&mut sequence)? == 0 {
@@ -66,6 +67,7 @@ fn read_fastq_record<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Fastq
             "Incomplete FASTQ record: missing sequence",
         ));
     }
+    sequence.truncate(sequence.trim_end().len());
 
     // Read + line
     if reader.read_line(&mut plus)? == 0 {
@@ -74,6 +76,7 @@ fn read_fastq_record<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Fastq
             "Incomplete FASTQ record: missing plus line",
         ));
     }
+    plus.truncate(plus.trim_end().len());
 
     // Read quality
     if reader.read_line(&mut quality)? == 0 {
@@ -82,6 +85,7 @@ fn read_fastq_record<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Fastq
             "Incomplete FASTQ record: missing quality",
         ));
     }
+    quality.truncate(quality.trim_end().len());
 
     Ok(Some(FastqRecord {
         header,
@@ -165,12 +169,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (r1, r2) = pair_result?;
 
         // Create ReadPair with index as ID
+        // Sequences and qualities are already trimmed by read_fastq_record
         let read_pair = ReadPair {
             read_id: idx.to_string(),
-            fwd_seq: r1.sequence.trim().to_string(),
-            rev_seq: r2.sequence.trim().to_string(),
-            fwd_qual: r1.quality.trim().to_string(),
-            rev_qual: r2.quality.trim().to_string(),
+            fwd_seq: r1.sequence,
+            rev_seq: r2.sequence,
+            fwd_qual: r1.quality,
+            rev_qual: r2.quality,
         };
 
         ctx.process_read(read_pair);
@@ -217,14 +222,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Write if this is an exemplar
         if exemplar_indices.contains(&idx) {
-            write!(writer, "{}", r1.header)?;
-            write!(writer, "{}", r1.sequence)?;
-            write!(writer, "{}", r1.plus)?;
-            write!(writer, "{}", r1.quality)?;
-            write!(writer, "{}", r2.header)?;
-            write!(writer, "{}", r2.sequence)?;
-            write!(writer, "{}", r2.plus)?;
-            write!(writer, "{}", r2.quality)?;
+            writeln!(writer, "{}", r1.header)?;
+            writeln!(writer, "{}", r1.sequence)?;
+            writeln!(writer, "{}", r1.plus)?;
+            writeln!(writer, "{}", r1.quality)?;
+            writeln!(writer, "{}", r2.header)?;
+            writeln!(writer, "{}", r2.sequence)?;
+            writeln!(writer, "{}", r2.plus)?;
+            writeln!(writer, "{}", r2.quality)?;
             written += 1;
         }
 
