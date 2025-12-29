@@ -167,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build set of exemplar indices
     let mut exemplar_indices = HashSet::new();
     for i in 0..pair_index {
-        let exemplar = ctx.get_final_exemplar(&i.to_string());
+        let exemplar = ctx.get_cluster_id(&i.to_string());
         if exemplar == i.to_string() {
             exemplar_indices.insert(i);
         }
