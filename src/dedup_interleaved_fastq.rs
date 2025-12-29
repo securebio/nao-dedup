@@ -61,13 +61,28 @@ fn read_fastq_record<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Fastq
     }
 
     // Read sequence
-    reader.read_line(&mut sequence)?;
+    if reader.read_line(&mut sequence)? == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Incomplete FASTQ record: missing sequence",
+        ));
+    }
 
     // Read + line
-    reader.read_line(&mut plus)?;
+    if reader.read_line(&mut plus)? == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Incomplete FASTQ record: missing plus line",
+        ));
+    }
 
     // Read quality
-    reader.read_line(&mut quality)?;
+    if reader.read_line(&mut quality)? == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Incomplete FASTQ record: missing quality",
+        ));
+    }
 
     Ok(Some(FastqRecord {
         header,
