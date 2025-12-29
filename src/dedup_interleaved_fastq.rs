@@ -195,10 +195,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (total_reads, unique_clusters) = ctx.stats();
     eprintln!("  Total reads: {}", total_reads);
     eprintln!("  Unique clusters: {}", unique_clusters);
-    eprintln!(
-        "  Deduplication rate: {:.2}%",
-        (1.0 - unique_clusters as f64 / total_reads as f64) * 100.0
-    );
+
+    if total_reads > 0 {
+        eprintln!(
+            "  Deduplication rate: {:.2}%",
+            (1.0 - unique_clusters as f64 / total_reads as f64) * 100.0
+        );
+    } else {
+        eprintln!("  Deduplication rate: 0.00%");
+    }
 
     // Build set of exemplar indices
     let exemplar_indices = ctx.get_exemplar_indices();

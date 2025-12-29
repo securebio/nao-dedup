@@ -1232,3 +1232,36 @@ class TestRustBinary:
         # Should have 2 pairs (4 records) since they don't match with strict threshold
         assert len(output_records) == 4, \
             f"Expected 4 records (2 pairs), got {len(output_records)}"
+
+    def test_binary_empty_input(self, binary_path, tmp_path):
+        """Test that the binary handles empty input files gracefully."""
+        import gzip
+
+        input_file = tmp_path / "empty.fastq.gz"
+        output_file = tmp_path / "output.fastq.gz"
+
+        # Create an empty gzipped file
+        with gzip.open(input_file, 'wt') as f:
+            pass  # Write nothing
+
+        # Run the binary
+        result = subprocess.run(
+            [str(binary_path), str(input_file), str(output_file)],
+            capture_output=True,
+            text=True
+        )
+
+        assert result.returncode == 0, f"Binary failed on empty input:\n{result.stderr}"
+
+        # Verify no NaN in output
+        assert "NaN" not in result.stderr, \
+            f"Binary output contains NaN: {result.stderr}"
+
+        # Verify deduplication rate is shown as 0.00%
+        assert "Deduplication rate: 0.00%" in result.stderr, \
+            f"Expected deduplication rate 0.00% in output: {result.stderr}"
+
+        # Output should be empty
+        output_records = self._read_fastq_gz(output_file)
+        assert len(output_records) == 0, \
+            f"Expected empty output for empty input, got {len(output_records)} records"
