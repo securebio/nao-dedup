@@ -1228,6 +1228,27 @@ class TestRustBinary:
         assert len(output_records) == 4, \
             f"Expected 4 records (2 pairs), got {len(output_records)}"
 
+        # Run with looser error threshold (should deduplicate)
+        output_file2 = tmp_path / "output2.fastq.gz"
+        result2 = subprocess.run(
+            [
+                str(binary_path),
+                str(input_file),
+                str(output_file2),
+                "--max-error-frac", "0.04",  # 4% threshold - sequences have 3% error
+            ],
+            capture_output=True,
+            text=True
+        )
+
+        assert result2.returncode == 0, f"Binary failed:\n{result2.stderr}"
+
+        output_records2 = self._read_fastq_gz(output_file2)
+
+        # Should have 1 pair (2 records) since they match with looser threshold
+        assert len(output_records2) == 2, \
+            f"Expected 2 records (1 pair), got {len(output_records2)}"
+
     def test_binary_empty_input(self, binary_path, tmp_path):
         """Test that the binary handles empty input files gracefully."""
         input_file = tmp_path / "empty.fastq.gz"
