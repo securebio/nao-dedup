@@ -188,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pair_iter = create_pair_iterator(&cli.input)?;
 
     let mut ctx = DedupContext::new(dedup_params, minimizer_params);
-    let mut pair_index = 0;
+    let mut pair_count = 0;
 
     for (idx, pair_result) in pair_iter.enumerate() {
         let (r1, r2) = pair_result?;
@@ -201,14 +201,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r1.quality,
             r2.quality,
         );
-        pair_index = idx + 1;
+        pair_count = idx + 1;
 
-        if pair_index % 100_000 == 0 {
-            eprintln!("  Processed {} read pairs...", pair_index);
+        if pair_count % 100_000 == 0 {
+            eprintln!("  Processed {} read pairs...", pair_count);
         }
     }
 
-    eprintln!("  Total read pairs: {}", pair_index);
+    eprintln!("  Total read pairs: {}", pair_count);
 
     // Finalize deduplication
     eprintln!("Finalizing deduplication...");
