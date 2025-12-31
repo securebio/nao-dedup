@@ -84,16 +84,18 @@ pub struct ReadPair {
     pub rev_qual: String,
 }
 
+/// Calculate mean quality score from forward and reverse quality strings.
+fn mean_quality(fwd_qual: &str, rev_qual: &str) -> f64 {
+    let total: u32 = fwd_qual.bytes().chain(rev_qual.bytes())
+        .map(|b| (b - 33) as u32)
+        .sum();
+    let count = (fwd_qual.len() + rev_qual.len()) as f64;
+    if count == 0.0 { 0.0 } else { total as f64 / count }
+}
+
 impl ReadPair {
     pub fn mean_quality(&self) -> f64 {
-        let total: u32 = self.fwd_qual.bytes().chain(self.rev_qual.bytes())
-            .map(|b| (b - 33) as u32)
-            .sum();
-        let count = (self.fwd_qual.len() + self.rev_qual.len()) as f64;
-        if count == 0.0 {
-            return 0.0;
-        }
-        total as f64 / count
+        mean_quality(&self.fwd_qual, &self.rev_qual)
     }
 }
 
@@ -418,11 +420,7 @@ impl DedupContext {
         let read_idx = idx as u32;
 
         // Calculate mean quality
-        let total: u32 = fwd_qual.bytes().chain(rev_qual.bytes())
-            .map(|b| (b - 33) as u32)
-            .sum();
-        let count = (fwd_qual.len() + rev_qual.len()) as f64;
-        let mean_q = if count == 0.0 { 0.0 } else { total as f64 / count };
+        let mean_q = mean_quality(&fwd_qual, &rev_qual);
 
         // Calculate score: quality is primary (scaled by 1000), length is secondary
         let length = (fwd_seq.len() + rev_seq.len()) as f64;
