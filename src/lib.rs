@@ -315,18 +315,19 @@ fn check_similarity(
 /// orientation, causing the same DNA fragment to be sequenced with forward/reverse
 /// swapped. Note: Rust version always uses tolerant mode (no strict mode option).
 fn reads_are_similar(
-    rp: &ReadPair,
+    fwd_seq: &str,
+    rev_seq: &str,
     exemplar: &StoredExemplar,
     dedup_params: &DedupParams,
 ) -> bool {
-    if check_similarity(&rp.fwd_seq, &exemplar.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
-        && check_similarity(&rp.rev_seq, &exemplar.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
+    if check_similarity(fwd_seq, &exemplar.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
+        && check_similarity(rev_seq, &exemplar.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
     {
         return true;
     }
 
-    if check_similarity(&rp.fwd_seq, &exemplar.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
-        && check_similarity(&rp.rev_seq, &exemplar.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
+    if check_similarity(fwd_seq, &exemplar.rev_seq, dedup_params.max_offset, dedup_params.max_error_frac)
+        && check_similarity(rev_seq, &exemplar.fwd_seq, dedup_params.max_offset, dedup_params.max_error_frac)
     {
         return true;
     }
@@ -445,14 +446,7 @@ impl DedupContext {
                     }
 
                     if let Some(candidate) = self.exemplar_store.get(candidate_idx as usize).and_then(|opt| opt.as_ref()) {
-                        let read_pair_temp = ReadPair {
-                            read_id: String::new(),  // Unused for similarity check
-                            fwd_seq: fwd_seq.clone(),
-                            rev_seq: rev_seq.clone(),
-                            fwd_qual: String::new(),  // Unused for similarity check
-                            rev_qual: String::new(),  // Unused for similarity check
-                        };
-                        if reads_are_similar(&read_pair_temp, candidate, &self.dedup_params) {
+                        if reads_are_similar(&fwd_seq, &rev_seq, candidate, &self.dedup_params) {
                             // candidate_idx from buckets is always a cluster leader
                             matching_cluster_idx = Some(candidate_idx);
                             break 'outer;
