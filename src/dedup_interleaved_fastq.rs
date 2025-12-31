@@ -207,7 +207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (1.0 - unique_clusters as f64 / total_reads as f64) * 100.0
         );
     } else {
-        eprintln!("  Deduplication rate: 0.00%");
+        eprintln!("Warning: No reads found in input file");
     }
 
     // Build set of exemplar indices
