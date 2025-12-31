@@ -147,6 +147,16 @@ impl<R: BufRead> Iterator for FastqPairIterator<R> {
     }
 }
 
+/// Creates a FASTQ pair iterator from a gzipped file.
+fn create_pair_iterator(
+    path: &PathBuf,
+) -> std::io::Result<FastqPairIterator<BufReader<GzDecoder<File>>>> {
+    let input_file = File::open(path)?;
+    let gz_decoder = GzDecoder::new(input_file);
+    let reader = BufReader::new(gz_decoder);
+    Ok(FastqPairIterator::new(reader))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -165,10 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Pass 1: Building deduplication index...");
 
     // Pass 1: Read all pairs and build deduplication index
-    let input_file = File::open(&cli.input)?;
-    let gz_decoder = GzDecoder::new(input_file);
-    let reader = BufReader::new(gz_decoder);
-    let pair_iter = FastqPairIterator::new(reader);
+    let pair_iter = create_pair_iterator(&cli.input)?;
 
     let mut ctx = DedupContext::new(dedup_params, minimizer_params);
     let mut pair_index = 0;
@@ -216,10 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Pass 2: Writing exemplars to output...");
 
     // Pass 2: Write exemplars
-    let input_file = File::open(&cli.input)?;
-    let gz_decoder = GzDecoder::new(input_file);
-    let reader = BufReader::new(gz_decoder);
-    let pair_iter = FastqPairIterator::new(reader);
+    let pair_iter = create_pair_iterator(&cli.input)?;
 
     let output_file = File::create(&cli.output)?;
     let gz_encoder = GzEncoder::new(output_file, Compression::default());
