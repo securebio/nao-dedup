@@ -1,14 +1,13 @@
-import random
-import subprocess
 import sys
+import gzip
+import random
+import pytest
+import subprocess
+import networkx as nx
 from pathlib import Path
 
 # Add parent directory to path so we can import dedup
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import networkx as nx
-import pytest
-
 from dedup import (
     EMPTY_KMER_SENTINEL_HASH,
     ORIENT_STRICT,
@@ -1015,8 +1014,6 @@ class TestRustBinary:
             path: Output file path
             records: List of (header, sequence, quality) tuples
         """
-        import gzip
-
         with gzip.open(path, 'wt') as f:
             for header, sequence, quality in records:
                 f.write(f"@{header}\n")
@@ -1030,8 +1027,6 @@ class TestRustBinary:
         Returns:
             List of (header, sequence, quality) tuples
         """
-        import gzip
-
         records = []
         with gzip.open(path, 'rt') as f:
             while True:
@@ -1235,8 +1230,6 @@ class TestRustBinary:
 
     def test_binary_empty_input(self, binary_path, tmp_path):
         """Test that the binary handles empty input files gracefully."""
-        import gzip
-
         input_file = tmp_path / "empty.fastq.gz"
         output_file = tmp_path / "output.fastq.gz"
 
@@ -1257,9 +1250,9 @@ class TestRustBinary:
         assert "NaN" not in result.stderr, \
             f"Binary output contains NaN: {result.stderr}"
 
-        # Verify deduplication rate is shown as 0.00%
-        assert "Deduplication rate: 0.00%" in result.stderr, \
-            f"Expected deduplication rate 0.00% in output: {result.stderr}"
+        # Verify warning message for empty input
+        assert "Warning: No reads found in input file" in result.stderr, \
+            f"Expected warning about no reads in output: {result.stderr}"
 
         # Output should be empty
         output_records = self._read_fastq_gz(output_file)
