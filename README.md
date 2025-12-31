@@ -1,10 +1,10 @@
-# nao_dedup
+# nao-dedup
 
 Sequencing read deduplication with error-tolerant matching
 
 ## Overview
 
-`nao_dedup` identifies and removes duplicate read pairs from sequencing data
+`nao-dedup` identifies and removes duplicate read pairs from sequencing data
 while being tolerant of small alignment shifts and sequencing errors. It uses
 minimizer-based bucketing for efficiency to avoid comparing every read pair
 against every other pair.
