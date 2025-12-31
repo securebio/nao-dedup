@@ -394,24 +394,41 @@ impl DedupContext {
         }
     }
 
-    /// Process one read pair. Returns the cluster ID it was assigned to.
+    /// Process one read pair by index (more efficient for indexed reads).
+    ///
+    /// This method is optimized for cases where reads are naturally indexed
+    /// (e.g., from enumerate), avoiding string allocation and hash lookups.
     ///
     /// Algorithm:
     /// 1. Extract minimizers and look up matching exemplars in buckets
     /// 2. Compare this read against candidates until we find a match
     /// 3a. If match found: add to existing cluster, potentially updating best_read_idx
     /// 3b. If no match: create new cluster with this read as initial exemplar
-    pub fn process_read(&mut self, read_pair: ReadPair) -> String {
-        // Intern the read ID to a compact u32 index
-        let read_idx = self.id_registry.get_or_create(&read_pair.read_id);
-        let mean_q = read_pair.mean_quality();
+    ///
+    /// Returns the cluster leader index.
+    pub fn process_read_by_index(
+        &mut self,
+        idx: usize,
+        fwd_seq: String,
+        rev_seq: String,
+        fwd_qual: String,
+        rev_qual: String,
+    ) -> u32 {
+        let read_idx = idx as u32;
+
+        // Calculate mean quality
+        let total: u32 = fwd_qual.bytes().chain(rev_qual.bytes())
+            .map(|b| (b - 33) as u32)
+            .sum();
+        let count = (fwd_qual.len() + rev_qual.len()) as f64;
+        let mean_q = if count == 0.0 { 0.0 } else { total as f64 / count };
 
         // Calculate score: quality is primary (scaled by 1000), length is secondary
-        let length = (read_pair.fwd_seq.len() + read_pair.rev_seq.len()) as f64;
+        let length = (fwd_seq.len() + rev_seq.len()) as f64;
         let score = mean_q * 1000.0 + length;
 
-        let fwd_mins = extract_minimizers(&read_pair.fwd_seq, &self.minimizer_params);
-        let rev_mins = extract_minimizers(&read_pair.rev_seq, &self.minimizer_params);
+        let fwd_mins = extract_minimizers(&fwd_seq, &self.minimizer_params);
+        let rev_mins = extract_minimizers(&rev_seq, &self.minimizer_params);
 
         let mut all_mins = fwd_mins;
         all_mins.extend(rev_mins);
@@ -428,7 +445,14 @@ impl DedupContext {
                     }
 
                     if let Some(candidate) = self.exemplar_store.get(candidate_idx as usize).and_then(|opt| opt.as_ref()) {
-                        if reads_are_similar(&read_pair, candidate, &self.dedup_params) {
+                        let read_pair_temp = ReadPair {
+                            read_id: String::new(),  // Unused for similarity check
+                            fwd_seq: fwd_seq.clone(),
+                            rev_seq: rev_seq.clone(),
+                            fwd_qual: String::new(),  // Unused for similarity check
+                            rev_qual: String::new(),  // Unused for similarity check
+                        };
+                        if reads_are_similar(&read_pair_temp, candidate, &self.dedup_params) {
                             // candidate_idx from buckets is always a cluster leader
                             matching_cluster_idx = Some(candidate_idx);
                             break 'outer;
@@ -467,8 +491,8 @@ impl DedupContext {
 
             // Store only sequences (not quality strings) to reduce memory footprint
             self.exemplar_store[read_idx as usize] = Some(StoredExemplar {
-                fwd_seq: read_pair.fwd_seq,
-                rev_seq: read_pair.rev_seq,
+                fwd_seq,
+                rev_seq,
             });
 
             // Add read to minimizer buckets (only for new exemplars)
@@ -484,6 +508,26 @@ impl DedupContext {
             self.results.resize(read_idx as usize + 1, 0);
         }
         self.results[read_idx as usize] = cluster_leader_idx;
+
+        cluster_leader_idx
+    }
+
+    /// Process one read pair. Returns the cluster ID it was assigned to.
+    ///
+    /// This method interns the read ID to an index and delegates to
+    /// process_read_by_index. See that method for algorithm details.
+    pub fn process_read(&mut self, read_pair: ReadPair) -> String {
+        // Intern the read ID to a compact u32 index
+        let read_idx = self.id_registry.get_or_create(&read_pair.read_id);
+
+        // Delegate to the index-based implementation
+        let cluster_leader_idx = self.process_read_by_index(
+            read_idx as usize,
+            read_pair.fwd_seq,
+            read_pair.rev_seq,
+            read_pair.fwd_qual,
+            read_pair.rev_qual,
+        );
 
         // Return the cluster leader's ID (as a String)
         self.id_registry.get_id(cluster_leader_idx).to_string()

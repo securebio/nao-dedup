@@ -2,7 +2,7 @@ use clap::Parser;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use nao_dedup::{DedupContext, DedupParams, MinimizerParams, ReadPair};
+use nao_dedup::{DedupContext, DedupParams, MinimizerParams};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
@@ -176,17 +176,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (idx, pair_result) in pair_iter.enumerate() {
         let (r1, r2) = pair_result?;
 
-        // Create ReadPair with index as ID
-        // Sequences and qualities are already trimmed by read_fastq_record
-        let read_pair = ReadPair {
-            read_id: idx.to_string(),
-            fwd_seq: r1.sequence,
-            rev_seq: r2.sequence,
-            fwd_qual: r1.quality,
-            rev_qual: r2.quality,
-        };
-
-        ctx.process_read(read_pair);
+        // Process by index directly (more efficient than creating ReadPair with string ID)
+        ctx.process_read_by_index(
+            idx,
+            r1.sequence,
+            r2.sequence,
+            r1.quality,
+            r2.quality,
+        );
         pair_index = idx + 1;
 
         if pair_index % 100_000 == 0 {
