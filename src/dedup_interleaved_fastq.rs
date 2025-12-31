@@ -60,6 +60,14 @@ fn read_fastq_record<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Fastq
     }
     header.truncate(header.trim_end().len());
 
+    // Validate header starts with '@'
+    if !header.starts_with('@') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Invalid FASTQ header: expected '@', got '{}'", header),
+        ));
+    }
+
     // Read sequence
     if reader.read_line(&mut sequence)? == 0 {
         return Err(std::io::Error::new(
@@ -77,6 +85,14 @@ fn read_fastq_record<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Fastq
         ));
     }
     plus.truncate(plus.trim_end().len());
+
+    // Validate separator is exactly '+'
+    if plus != "+" {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Invalid FASTQ separator: expected '+', got '{}'", plus),
+        ));
+    }
 
     // Read quality
     if reader.read_line(&mut quality)? == 0 {
