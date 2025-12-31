@@ -114,15 +114,11 @@ fn read_fastq_record<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Fastq
 /// Iterator that yields pairs of FASTQ records from an interleaved FASTQ file.
 struct FastqPairIterator<R: BufRead> {
     reader: R,
-    warned_odd: bool,
 }
 
 impl<R: BufRead> FastqPairIterator<R> {
     fn new(reader: R) -> Self {
-        Self {
-            reader,
-            warned_odd: false,
-        }
+        Self { reader }
     }
 }
 
@@ -141,11 +137,7 @@ impl<R: BufRead> Iterator for FastqPairIterator<R> {
         let r2 = match read_fastq_record(&mut self.reader) {
             Ok(Some(record)) => record,
             Ok(None) => {
-                // Odd number of reads - warn once and stop
-                if !self.warned_odd {
-                    eprintln!("Warning: Odd number of reads in file. Last read ignored.");
-                    self.warned_odd = true;
-                }
+                eprintln!("Warning: Odd number of reads in file. Last read ignored.");
                 return None;
             }
             Err(e) => return Some(Err(e)),
