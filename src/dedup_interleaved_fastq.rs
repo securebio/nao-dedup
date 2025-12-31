@@ -48,6 +48,16 @@ struct FastqRecord {
     quality: String,
 }
 
+impl FastqRecord {
+    fn write_to<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        writeln!(writer, "{}", self.header)?;
+        writeln!(writer, "{}", self.sequence)?;
+        writeln!(writer, "{}", self.plus)?;
+        writeln!(writer, "{}", self.quality)?;
+        Ok(())
+    }
+}
+
 fn read_fastq_record<R: BufRead>(reader: &mut R) -> std::io::Result<Option<FastqRecord>> {
     let mut header = String::new();
     let mut sequence = String::new();
@@ -236,14 +246,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Write if this is an exemplar
         if exemplar_indices.contains(&idx) {
-            writeln!(writer, "{}", r1.header)?;
-            writeln!(writer, "{}", r1.sequence)?;
-            writeln!(writer, "{}", r1.plus)?;
-            writeln!(writer, "{}", r1.quality)?;
-            writeln!(writer, "{}", r2.header)?;
-            writeln!(writer, "{}", r2.sequence)?;
-            writeln!(writer, "{}", r2.plus)?;
-            writeln!(writer, "{}", r2.quality)?;
+            r1.write_to(&mut writer)?;
+            r2.write_to(&mut writer)?;
             written += 1;
         }
 
