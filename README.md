@@ -270,6 +270,14 @@ View all options:
 The binary expects interleaved paired-end FASTQ files where R1 and R2 reads
 alternate (R1, R2, R1, R2, ...). The input file must be gzip-compressed.
 
+The input file must not be streamed, because we process it in two passes.  So
+you can't do:
+
+```bash
+./target/release/dedup_interleaved_fastq \
+    <(aws s3 cp s3://.../input.fastq.gz -) output.fastq.gz
+```
+
 #### Output
 
 The output file contains only the exemplar read pairs (one representative per
