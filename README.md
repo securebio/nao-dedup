@@ -447,4 +447,3 @@ To ensure the Python and Rust implementations stay in sync, tests include:
 
 The Rust library is built automatically when tests are run if not already
 present.
-
