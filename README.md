@@ -35,28 +35,34 @@ against every other pair.
 
 ### API Overview
 
-The Rust library is designed as a stateful context that processes reads in two
-passes:
+The Rust library is designed as a stateful context that processes reads using
+an index-based API:
 
 #### Pass 1: Process Reads
 
 ```rust
-use nao_dedup::{DedupContext, DedupParams, MinimizerParams, ReadPair};
+use nao_dedup::{DedupContext, DedupParams, MinimizerParams};
 
 // Create context with default or custom parameters
 let dedup_params = DedupParams::default();
 let minimizer_params = MinimizerParams::default();
 let mut ctx = DedupContext::new(dedup_params, minimizer_params);
 
-// Process each read
-let read_pair = ReadPair {
-    read_id: "read1".to_string(),
-    fwd_seq: "ACGTACGT".to_string(),
-    rev_seq: "TGCATGCA".to_string(),
-    fwd_qual: "IIIIIIII".to_string(),
-    rev_qual: "IIIIIIII".to_string(),
-};
-ctx.process_read(read_pair);
+// Process each read by index
+ctx.process_read_by_index(
+    0,  // read index
+    "ACGTACGT".to_string(),  // forward sequence
+    "TGCATGCA".to_string(),  // reverse sequence
+    "IIIIIIII".to_string(),  // forward quality
+    "IIIIIIII".to_string(),  // reverse quality
+);
+ctx.process_read_by_index(
+    1,
+    "ACGTACGT".to_string(),  // duplicate of read 0
+    "TGCATGCA".to_string(),
+    "IIIIIIII".to_string(),
+    "IIIIIIII".to_string(),
+);
 ```
 
 #### Pass 2: Finalize
@@ -69,9 +75,12 @@ ctx.finalize();
 #### Query Results
 
 ```rust
-// After finalization, query cluster IDs
-let cluster_id = ctx.get_cluster_id("read1");
-println!("read1 -> {}", cluster_id);
+// After finalization, query exemplar indices
+let exemplar_idx = ctx.get_exemplar_index(0);  // Returns 0 (itself)
+let exemplar_idx = ctx.get_exemplar_index(1);  // Returns 0 (clustered with read 0)
+
+// Get set of all exemplar indices (for filtering)
+let exemplar_indices = ctx.get_exemplar_indices();
 
 // Get statistics
 let (total_processed, unique_clusters) = ctx.stats();
