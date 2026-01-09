@@ -909,23 +909,29 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(1234);
         let read_len = 150;
 
-        fn seq_with_error(seq: &str, rng: &mut StdRng, read_len: usize) -> String {
-            let error_loc = rng.gen_range(0..read_len);
-            let start = if rng.gen_bool(0.5) { 1 } else { 0 };
-            let bases = ['A', 'C', 'G', 'T'];
-            let new_base = bases[rng.gen_range(0..4)];
+        // Helper to introduce errors: random 1bp offset and/or single base substitution
+        fn seq_with_error(seq: &str, rng: &mut StdRng) -> String {
+            if seq.is_empty() {
+                return seq.to_string();
+            }
 
-            // Handle the offset case: trim from start if needed
-            if start == 1 && seq.len() > 1 && error_loc > 0 {
-                // Remove first base, introduce error at error_loc-1 in the remaining sequence
-                let adjusted_loc = error_loc.saturating_sub(1).min(seq.len() - 2);
-                format!("{}{}{}", &seq[1..=adjusted_loc], new_base, &seq[adjusted_loc + 2..])
-            } else if error_loc < seq.len() {
-                // No offset, just introduce error at error_loc
-                format!("{}{}{}", &seq[0..error_loc], new_base, &seq[error_loc + 1..].trim_end())
+            let bases = ['A', 'C', 'G', 'T'];
+
+            // Randomly apply 1bp offset (remove first base)
+            let mut result = if rng.gen_bool(0.5) && seq.len() > 1 {
+                seq[1..].to_string()
             } else {
                 seq.to_string()
+            };
+
+            // Introduce a single base substitution at a random position
+            if !result.is_empty() {
+                let error_pos = rng.gen_range(0..result.len());
+                let new_base = bases[rng.gen_range(0..4)];
+                result.replace_range(error_pos..=error_pos, &new_base.to_string());
             }
+
+            result
         }
 
         for _ in 0..100 {
@@ -933,8 +939,8 @@ mod tests {
             let fwd1 = random_seq(read_len, &mut rng);
             let rev1 = random_seq(read_len, &mut rng);
 
-            let fwd2 = seq_with_error(&fwd1, &mut rng, read_len);
-            let rev2 = seq_with_error(&rev1, &mut rng, read_len);
+            let fwd2 = seq_with_error(&fwd1, &mut rng);
+            let rev2 = seq_with_error(&rev1, &mut rng);
 
             let fwd2_len = fwd2.len();
             let rev2_len = rev2.len();
