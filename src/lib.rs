@@ -646,7 +646,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Helper Functions Tests (4 tests)
+    // Helper Functions Tests
     // ========================================================================
 
     #[test]
@@ -681,7 +681,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Minimizer Extraction Tests (6 tests)
+    // Minimizer Extraction Tests
     // ========================================================================
 
     #[test]
@@ -753,7 +753,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Sequence Matching Tests (6 tests)
+    // Sequence Matching Tests
     // ========================================================================
 
     #[test]
@@ -842,7 +842,7 @@ mod tests {
     }
 
     // ========================================================================
-    // ReadPair Validation Tests (2 tests)
+    // ReadPair Validation Tests
     // ========================================================================
 
     #[test]
@@ -872,7 +872,7 @@ mod tests {
     }
 
     // ========================================================================
-    // Parameter Validation Tests (2 tests)
+    // Parameter Validation Tests
     // ========================================================================
 
     #[test]
@@ -974,5 +974,274 @@ mod tests {
             let shared = set1.intersection(&set2).count();
             assert!(shared > 0, "Duplicates with errors should share at least one bucket");
         }
+    }
+
+    // ========================================================================
+    // Base Encoding Tests
+    // ========================================================================
+
+    #[test]
+    fn test_encode_base_valid_uppercase() {
+        assert_eq!(encode_base(b'A'), Some(0));
+        assert_eq!(encode_base(b'C'), Some(1));
+        assert_eq!(encode_base(b'G'), Some(2));
+        assert_eq!(encode_base(b'T'), Some(3));
+    }
+
+    #[test]
+    fn test_encode_base_valid_lowercase() {
+        assert_eq!(encode_base(b'a'), Some(0));
+        assert_eq!(encode_base(b'c'), Some(1));
+        assert_eq!(encode_base(b'g'), Some(2));
+        assert_eq!(encode_base(b't'), Some(3));
+    }
+
+    #[test]
+    fn test_encode_base_invalid_n() {
+        assert_eq!(encode_base(b'N'), None);
+        assert_eq!(encode_base(b'n'), None);
+    }
+
+    #[test]
+    fn test_encode_base_invalid_characters() {
+        assert_eq!(encode_base(b'X'), None);
+        assert_eq!(encode_base(b'Y'), None);
+        assert_eq!(encode_base(b'-'), None);
+        assert_eq!(encode_base(b' '), None);
+        assert_eq!(encode_base(b'0'), None);
+    }
+
+    // ========================================================================
+    // IDRegistry Tests
+    // ========================================================================
+
+    #[test]
+    fn test_id_registry_get_or_create_new_ids() {
+        let mut registry = IDRegistry::new();
+
+        let idx1 = registry.get_or_create("read1");
+        let idx2 = registry.get_or_create("read2");
+        let idx3 = registry.get_or_create("read3");
+
+        assert_eq!(idx1, 0);
+        assert_eq!(idx2, 1);
+        assert_eq!(idx3, 2);
+    }
+
+    #[test]
+    fn test_id_registry_duplicate_ids_same_index() {
+        let mut registry = IDRegistry::new();
+
+        let idx1 = registry.get_or_create("read1");
+        let idx2 = registry.get_or_create("read1");
+        let idx3 = registry.get_or_create("read1");
+
+        assert_eq!(idx1, idx2);
+        assert_eq!(idx2, idx3);
+    }
+
+    #[test]
+    fn test_id_registry_get_id_retrieval() {
+        let mut registry = IDRegistry::new();
+
+        registry.get_or_create("read1");
+        registry.get_or_create("read2");
+        registry.get_or_create("read3");
+
+        assert_eq!(registry.get_id(0), "read1");
+        assert_eq!(registry.get_id(1), "read2");
+        assert_eq!(registry.get_id(2), "read3");
+    }
+
+    #[test]
+    fn test_id_registry_roundtrip() {
+        let mut registry = IDRegistry::new();
+
+        let original_ids = vec!["read_A", "read_B", "read_C", "read_D"];
+
+        // Store all IDs and get their indices
+        let mut indices = Vec::new();
+        for id in &original_ids {
+            indices.push(registry.get_or_create(id));
+        }
+
+        // Retrieve IDs and verify they match
+        for (idx, original_id) in indices.iter().zip(&original_ids) {
+            assert_eq!(registry.get_id(*idx), *original_id);
+        }
+    }
+
+    // ========================================================================
+    // DedupContext Public API Tests
+    // ========================================================================
+
+    #[test]
+    fn test_dedup_context_stats() {
+        let dedup_params = DedupParams::default();
+        let minimizer_params = MinimizerParams::default();
+
+        let read_pairs = vec![
+            ReadPair {
+                read_id: "read1".to_string(),
+                fwd_seq: "ACGTACGTACGTACGT".to_string(),
+                rev_seq: "TGCATGCATGCATGCA".to_string(),
+                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
+                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
+            },
+            ReadPair {
+                read_id: "read2".to_string(),
+                fwd_seq: "ACGTACGTACGTACGT".to_string(), // Duplicate
+                rev_seq: "TGCATGCATGCATGCA".to_string(),
+                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
+                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
+            },
+            ReadPair {
+                read_id: "read3".to_string(),
+                fwd_seq: "GGGGAAAACCCCTTTT".to_string(), // Different
+                rev_seq: "TTTTGGGGCCCCAAAA".to_string(),
+                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
+                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
+            },
+        ];
+
+        let mut ctx = DedupContext::new(dedup_params, minimizer_params);
+
+        for rp in read_pairs {
+            ctx.process_read(rp);
+        }
+
+        ctx.finalize();
+
+        let (total_reads, unique_clusters) = ctx.stats();
+        assert_eq!(total_reads, 3);
+        assert_eq!(unique_clusters, 2); // read1 and read2 cluster together, read3 is separate
+    }
+
+    #[test]
+    fn test_dedup_context_get_cluster_id() {
+        let dedup_params = DedupParams::default();
+        let minimizer_params = MinimizerParams::default();
+
+        let read_pairs = vec![
+            ReadPair {
+                read_id: "read1".to_string(),
+                fwd_seq: "ACGTACGTACGTACGT".to_string(),
+                rev_seq: "TGCATGCATGCATGCA".to_string(),
+                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
+                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
+            },
+            ReadPair {
+                read_id: "read2".to_string(),
+                fwd_seq: "ACGTACGTACGTACGT".to_string(), // Duplicate
+                rev_seq: "TGCATGCATGCATGCA".to_string(),
+                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
+                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
+            },
+        ];
+
+        let mut ctx = DedupContext::new(dedup_params, minimizer_params);
+
+        for rp in read_pairs {
+            ctx.process_read(rp);
+        }
+
+        ctx.finalize();
+
+        // Both reads should have the same cluster ID
+        let cluster1 = ctx.get_cluster_id("read1");
+        let cluster2 = ctx.get_cluster_id("read2");
+        assert_eq!(cluster1, cluster2);
+    }
+
+    #[test]
+    fn test_dedup_context_get_cluster_id_unknown_read() {
+        let dedup_params = DedupParams::default();
+        let minimizer_params = MinimizerParams::default();
+
+        let mut ctx = DedupContext::new(dedup_params, minimizer_params);
+        ctx.finalize();
+
+        // Unknown read ID should return the ID itself
+        assert_eq!(ctx.get_cluster_id("unknown_read"), "unknown_read");
+    }
+
+    #[test]
+    fn test_dedup_context_get_exemplar_indices() {
+        let dedup_params = DedupParams::default();
+        let minimizer_params = MinimizerParams::default();
+
+        let read_pairs = vec![
+            ReadPair {
+                read_id: "read1".to_string(),
+                fwd_seq: "ACGTACGTACGTACGT".to_string(),
+                rev_seq: "TGCATGCATGCATGCA".to_string(),
+                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
+                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
+            },
+            ReadPair {
+                read_id: "read2".to_string(),
+                fwd_seq: "ACGTACGTACGTACGT".to_string(), // Duplicate
+                rev_seq: "TGCATGCATGCATGCA".to_string(),
+                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
+                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
+            },
+            ReadPair {
+                read_id: "read3".to_string(),
+                fwd_seq: "GGGGAAAACCCCTTTT".to_string(), // Different
+                rev_seq: "TTTTGGGGCCCCAAAA".to_string(),
+                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
+                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
+            },
+        ];
+
+        let mut ctx = DedupContext::new(dedup_params, minimizer_params);
+
+        for rp in read_pairs {
+            ctx.process_read(rp);
+        }
+
+        ctx.finalize();
+
+        let exemplar_indices = ctx.get_exemplar_indices();
+
+        // Should have 2 exemplars (one for cluster of read1/read2, one for read3)
+        assert_eq!(exemplar_indices.len(), 2);
+
+        // Exemplar indices should be 0 (for read1) and 2 (for read3)
+        assert!(exemplar_indices.contains(&0) || exemplar_indices.contains(&1));
+        assert!(exemplar_indices.contains(&2));
+    }
+
+    #[test]
+    #[should_panic(expected = "get_exemplar_indices must be called after finalize()")]
+    fn test_dedup_context_get_exemplar_indices_before_finalize() {
+        let dedup_params = DedupParams::default();
+        let minimizer_params = MinimizerParams::default();
+
+        let ctx = DedupContext::new(dedup_params, minimizer_params);
+
+        // Should panic because finalize() hasn't been called
+        ctx.get_exemplar_indices();
+    }
+
+    // ========================================================================
+    // Default Parameter Tests
+    // ========================================================================
+
+    #[test]
+    fn test_dedup_params_default() {
+        let params = DedupParams::default();
+
+        assert_eq!(params.max_offset, 1);
+        assert_eq!(params.max_error_frac, 0.01);
+    }
+
+    #[test]
+    fn test_minimizer_params_default() {
+        let params = MinimizerParams::default();
+
+        assert_eq!(params.kmer_len, 15);
+        assert_eq!(params.window_len, 25);
+        assert_eq!(params.num_windows, 4);
     }
 }
