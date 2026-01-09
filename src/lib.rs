@@ -1,4 +1,4 @@
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashSet;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -64,30 +64,21 @@ impl Default for MinimizerParams {
 }
 
 // ============================================================================
-// Read Pair
+// Helper Functions
 // ============================================================================
-
-#[derive(Debug, Clone)]
-pub struct ReadPair {
-    pub read_id: String,
-    pub fwd_seq: String,
-    pub rev_seq: String,
-    pub fwd_qual: String,
-    pub rev_qual: String,
-}
 
 /// Calculate mean quality score from forward and reverse quality strings.
 fn mean_quality(fwd_qual: &str, rev_qual: &str) -> f64 {
-    let total: u32 = fwd_qual.bytes().chain(rev_qual.bytes())
+    let total: u32 = fwd_qual
+        .bytes()
+        .chain(rev_qual.bytes())
         .map(|b| (b - 33) as u32)
         .sum();
     let count = (fwd_qual.len() + rev_qual.len()) as f64;
-    if count == 0.0 { 0.0 } else { total as f64 / count }
-}
-
-impl ReadPair {
-    pub fn mean_quality(&self) -> f64 {
-        mean_quality(&self.fwd_qual, &self.rev_qual)
+    if count == 0.0 {
+        0.0
+    } else {
+        total as f64 / count
     }
 }
 
@@ -97,39 +88,6 @@ impl ReadPair {
 struct StoredExemplar {
     fwd_seq: String,
     rev_seq: String,
-}
-
-/// ID registry for interning read IDs to compact u32 indices.
-/// Dramatically reduces memory usage and improves hash/comparison performance.
-struct IDRegistry {
-    id_to_index: AHashMap<String, u32>,
-    index_to_id: Vec<String>,
-}
-
-impl IDRegistry {
-    fn new() -> Self {
-        Self {
-            id_to_index: AHashMap::new(),
-            index_to_id: Vec::new(),
-        }
-    }
-
-    /// Get or create an index for a read ID
-    fn get_or_create(&mut self, id: &str) -> u32 {
-        if let Some(&idx) = self.id_to_index.get(id) {
-            return idx;
-        }
-        let idx = self.index_to_id.len() as u32;
-        self.index_to_id.push(id.to_string());
-        self.id_to_index.insert(id.to_string(), idx);
-        idx
-    }
-
-    /// Convert index back to read ID
-    #[inline]
-    fn get_id(&self, idx: u32) -> &str {
-        &self.index_to_id[idx as usize]
-    }
 }
 
 // ============================================================================
@@ -351,14 +309,9 @@ pub struct DedupContext {
     dedup_params: DedupParams,
     minimizer_params: MinimizerParams,
 
-    // ID interning: read IDs -> compact u32 indices for faster hashing/comparison
-    id_registry: IDRegistry,
-
-    // HashMap choices:
-    // - FxHashMap for integer keys: u64/u32 keys are well-distributed
-    //   integers, so we can use the ultra-fast FxHash (just a multiply + XOR)
-
-    // minimizer -> list of read indices (instead of read IDs)
+    // minimizer -> list of read indices
+    // FxHashMap for integer keys: u64 keys are well-distributed,
+    // so we use ultra-fast FxHash (just a multiply + XOR)
     buckets: FxHashMap<u64, Vec<u32>>,
 
     // read_idx -> read sequences (only for exemplars, quality strings omitted)
@@ -378,7 +331,6 @@ impl DedupContext {
         Self {
             dedup_params,
             minimizer_params,
-            id_registry: IDRegistry::new(),
             buckets: FxHashMap::default(),
             exemplar_store: Vec::new(),
             results: Vec::new(),
@@ -494,27 +446,6 @@ impl DedupContext {
         cluster_leader_idx
     }
 
-    /// Process one read pair. Returns the cluster ID it was assigned to.
-    ///
-    /// This method interns the read ID to an index and delegates to
-    /// process_read_by_index. See that method for algorithm details.
-    pub fn process_read(&mut self, read_pair: ReadPair) -> String {
-        // Intern the read ID to a compact u32 index
-        let read_idx = self.id_registry.get_or_create(&read_pair.read_id);
-
-        // Delegate to the index-based implementation
-        let cluster_leader_idx = self.process_read_by_index(
-            read_idx as usize,
-            read_pair.fwd_seq,
-            read_pair.rev_seq,
-            read_pair.fwd_qual,
-            read_pair.rev_qual,
-        );
-
-        // Return the cluster leader's ID (as a String)
-        self.id_registry.get_id(cluster_leader_idx).to_string()
-    }
-
     /// Finalize results: resolve all reads to their cluster's best_read_idx.
     ///
     /// During streaming, reads point to the cluster leader index (first exemplar).
@@ -533,15 +464,6 @@ impl DedupContext {
         // Free memory for intermediate data structures
         self.buckets.clear();
         self.exemplar_store.clear();
-    }
-
-    pub fn get_cluster_id(&self, read_id: &str) -> String {
-        if let Some(&read_idx) = self.id_registry.id_to_index.get(read_id) {
-            if let Some(&cluster_idx) = self.results.get(read_idx as usize) {
-                return self.id_registry.get_id(cluster_idx).to_string();
-            }
-        }
-        read_id.to_string()
     }
 
     pub fn stats(&self) -> (usize, usize) {
@@ -567,38 +489,18 @@ impl DedupContext {
             .map(|stats| stats.best_read_idx as usize)
             .collect()
     }
-}
 
-// ============================================================================
-// Public API
-// ============================================================================
-
-pub fn deduplicate_read_pairs(
-    read_pairs: Vec<ReadPair>,
-    dedup_params: Option<DedupParams>,
-    minimizer_params: Option<MinimizerParams>,
-) -> AHashMap<String, String> {
-    let dedup_params = dedup_params.unwrap_or_default();
-    let minimizer_params = minimizer_params.unwrap_or_default();
-
-    let mut ctx = DedupContext::new(dedup_params, minimizer_params);
-
-    for rp in read_pairs {
-        ctx.process_read(rp);
+    /// Get the exemplar index for a given read index.
+    ///
+    /// Must be called after finalize(). Returns the index of the best read
+    /// in the cluster that this read belongs to.
+    pub fn get_exemplar_index(&self, read_idx: usize) -> usize {
+        assert!(
+            self.finalized,
+            "get_exemplar_index must be called after finalize()"
+        );
+        self.results[read_idx] as usize
     }
-
-    ctx.finalize();
-
-    // Convert internal index-based results to HashMap<String, String> for public API
-    let mut result_map = AHashMap::with_capacity(ctx.results.len());
-    for read_idx in 0..ctx.results.len() {
-        let cluster_idx = ctx.results[read_idx];
-        let read_id = ctx.id_registry.get_id(read_idx as u32);
-        let cluster_id = ctx.id_registry.get_id(cluster_idx);
-        result_map.insert(read_id.to_string(), cluster_id.to_string());
-    }
-
-    result_map
 }
 
 // ============================================================================
@@ -842,33 +744,19 @@ mod tests {
     }
 
     // ========================================================================
-    // ReadPair Validation Tests
+    // Quality Calculation Tests
     // ========================================================================
 
     #[test]
     fn test_mean_qual_calculation() {
         // Phred 33: '!' = 0, 'I' = 40
-        let rp = ReadPair {
-            read_id: "test".to_string(),
-            fwd_seq: "AAAA".to_string(),
-            rev_seq: "TTTT".to_string(),
-            fwd_qual: "!!!!".to_string(),
-            rev_qual: "IIII".to_string(),
-        };
         let expected_mean = (0.0 + 0.0 + 0.0 + 0.0 + 40.0 + 40.0 + 40.0 + 40.0) / 8.0;
-        assert_eq!(rp.mean_quality(), expected_mean);
+        assert_eq!(mean_quality("!!!!", "IIII"), expected_mean);
     }
 
     #[test]
     fn test_mean_qual_empty_qualities() {
-        let rp = ReadPair {
-            read_id: "test".to_string(),
-            fwd_seq: "AAAA".to_string(),
-            rev_seq: "TTTT".to_string(),
-            fwd_qual: "".to_string(),
-            rev_qual: "".to_string(),
-        };
-        assert_eq!(rp.mean_quality(), 0.0);
+        assert_eq!(mean_quality("", ""), 0.0);
     }
 
     // ========================================================================
@@ -942,31 +830,13 @@ mod tests {
             let fwd2 = seq_with_error(&fwd1, &mut rng);
             let rev2 = seq_with_error(&rev1, &mut rng);
 
-            let fwd2_len = fwd2.len();
-            let rev2_len = rev2.len();
-
-            let rp1 = ReadPair {
-                read_id: "pair1".to_string(),
-                fwd_seq: fwd1,
-                rev_seq: rev1,
-                fwd_qual: "I".repeat(read_len),
-                rev_qual: "I".repeat(read_len),
-            };
-            let rp2 = ReadPair {
-                read_id: "pair2".to_string(),
-                fwd_seq: fwd2,
-                rev_seq: rev2,
-                fwd_qual: "I".repeat(fwd2_len),
-                rev_qual: "I".repeat(rev2_len),
-            };
-
             let m_params = MinimizerParams::default();
 
             // Extract minimizers from both reads
-            let mins1_fwd = extract_minimizers(&rp1.fwd_seq, &m_params);
-            let mins1_rev = extract_minimizers(&rp1.rev_seq, &m_params);
-            let mins2_fwd = extract_minimizers(&rp2.fwd_seq, &m_params);
-            let mins2_rev = extract_minimizers(&rp2.rev_seq, &m_params);
+            let mins1_fwd = extract_minimizers(&fwd1, &m_params);
+            let mins1_rev = extract_minimizers(&rev1, &m_params);
+            let mins2_fwd = extract_minimizers(&fwd2, &m_params);
+            let mins2_rev = extract_minimizers(&rev2, &m_params);
 
             // Check if they share at least one minimizer
             let mut all_mins1 = mins1_fwd;
@@ -1018,66 +888,6 @@ mod tests {
     }
 
     // ========================================================================
-    // IDRegistry Tests
-    // ========================================================================
-
-    #[test]
-    fn test_id_registry_get_or_create_new_ids() {
-        let mut registry = IDRegistry::new();
-
-        let idx1 = registry.get_or_create("read1");
-        let idx2 = registry.get_or_create("read2");
-        let idx3 = registry.get_or_create("read3");
-
-        assert_eq!(idx1, 0);
-        assert_eq!(idx2, 1);
-        assert_eq!(idx3, 2);
-    }
-
-    #[test]
-    fn test_id_registry_duplicate_ids_same_index() {
-        let mut registry = IDRegistry::new();
-
-        let idx1 = registry.get_or_create("read1");
-        let idx2 = registry.get_or_create("read1");
-        let idx3 = registry.get_or_create("read1");
-
-        assert_eq!(idx1, idx2);
-        assert_eq!(idx2, idx3);
-    }
-
-    #[test]
-    fn test_id_registry_get_id_retrieval() {
-        let mut registry = IDRegistry::new();
-
-        registry.get_or_create("read1");
-        registry.get_or_create("read2");
-        registry.get_or_create("read3");
-
-        assert_eq!(registry.get_id(0), "read1");
-        assert_eq!(registry.get_id(1), "read2");
-        assert_eq!(registry.get_id(2), "read3");
-    }
-
-    #[test]
-    fn test_id_registry_roundtrip() {
-        let mut registry = IDRegistry::new();
-
-        let original_ids = vec!["read_A", "read_B", "read_C", "read_D"];
-
-        // Store all IDs and get their indices
-        let mut indices = Vec::new();
-        for id in &original_ids {
-            indices.push(registry.get_or_create(id));
-        }
-
-        // Retrieve IDs and verify they match
-        for (idx, original_id) in indices.iter().zip(&original_ids) {
-            assert_eq!(registry.get_id(*idx), *original_id);
-        }
-    }
-
-    // ========================================================================
     // DedupContext Public API Tests
     // ========================================================================
 
@@ -1085,135 +895,110 @@ mod tests {
     fn test_dedup_context_stats() {
         let dedup_params = DedupParams::default();
         let minimizer_params = MinimizerParams::default();
-
-        let read_pairs = vec![
-            ReadPair {
-                read_id: "read1".to_string(),
-                fwd_seq: "ACGTACGTACGTACGT".to_string(),
-                rev_seq: "TGCATGCATGCATGCA".to_string(),
-                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
-                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
-            },
-            ReadPair {
-                read_id: "read2".to_string(),
-                fwd_seq: "ACGTACGTACGTACGT".to_string(), // Duplicate
-                rev_seq: "TGCATGCATGCATGCA".to_string(),
-                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
-                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
-            },
-            ReadPair {
-                read_id: "read3".to_string(),
-                fwd_seq: "GGGGAAAACCCCTTTT".to_string(), // Different
-                rev_seq: "TTTTGGGGCCCCAAAA".to_string(),
-                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
-                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
-            },
-        ];
-
         let mut ctx = DedupContext::new(dedup_params, minimizer_params);
 
-        for rp in read_pairs {
-            ctx.process_read(rp);
-        }
+        // Read 0: first sequence
+        ctx.process_read_by_index(
+            0,
+            "ACGTACGTACGTACGT".to_string(),
+            "TGCATGCATGCATGCA".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+        );
+        // Read 1: duplicate of read 0
+        ctx.process_read_by_index(
+            1,
+            "ACGTACGTACGTACGT".to_string(),
+            "TGCATGCATGCATGCA".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+        );
+        // Read 2: different sequence
+        ctx.process_read_by_index(
+            2,
+            "GGGGAAAACCCCTTTT".to_string(),
+            "TTTTGGGGCCCCAAAA".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+        );
 
         ctx.finalize();
 
         let (total_reads, unique_clusters) = ctx.stats();
         assert_eq!(total_reads, 3);
-        assert_eq!(unique_clusters, 2); // read1 and read2 cluster together, read3 is separate
+        assert_eq!(unique_clusters, 2); // read 0 and read 1 cluster together, read 2 is separate
     }
 
     #[test]
-    fn test_dedup_context_get_cluster_id() {
+    fn test_dedup_context_get_exemplar_index() {
         let dedup_params = DedupParams::default();
         let minimizer_params = MinimizerParams::default();
-
-        let read_pairs = vec![
-            ReadPair {
-                read_id: "read1".to_string(),
-                fwd_seq: "ACGTACGTACGTACGT".to_string(),
-                rev_seq: "TGCATGCATGCATGCA".to_string(),
-                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
-                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
-            },
-            ReadPair {
-                read_id: "read2".to_string(),
-                fwd_seq: "ACGTACGTACGTACGT".to_string(), // Duplicate
-                rev_seq: "TGCATGCATGCATGCA".to_string(),
-                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
-                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
-            },
-        ];
-
         let mut ctx = DedupContext::new(dedup_params, minimizer_params);
 
-        for rp in read_pairs {
-            ctx.process_read(rp);
-        }
+        // Read 0: first sequence
+        ctx.process_read_by_index(
+            0,
+            "ACGTACGTACGTACGT".to_string(),
+            "TGCATGCATGCATGCA".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+        );
+        // Read 1: duplicate of read 0
+        ctx.process_read_by_index(
+            1,
+            "ACGTACGTACGTACGT".to_string(),
+            "TGCATGCATGCATGCA".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+        );
 
         ctx.finalize();
 
-        // Both reads should have the same cluster ID
-        let cluster1 = ctx.get_cluster_id("read1");
-        let cluster2 = ctx.get_cluster_id("read2");
-        assert_eq!(cluster1, cluster2);
-    }
-
-    #[test]
-    fn test_dedup_context_get_cluster_id_unknown_read() {
-        let dedup_params = DedupParams::default();
-        let minimizer_params = MinimizerParams::default();
-
-        let mut ctx = DedupContext::new(dedup_params, minimizer_params);
-        ctx.finalize();
-
-        // Unknown read ID should return the ID itself
-        assert_eq!(ctx.get_cluster_id("unknown_read"), "unknown_read");
+        // Both reads should have the same exemplar index
+        let exemplar0 = ctx.get_exemplar_index(0);
+        let exemplar1 = ctx.get_exemplar_index(1);
+        assert_eq!(exemplar0, exemplar1);
     }
 
     #[test]
     fn test_dedup_context_get_exemplar_indices() {
         let dedup_params = DedupParams::default();
         let minimizer_params = MinimizerParams::default();
-
-        let read_pairs = vec![
-            ReadPair {
-                read_id: "read1".to_string(),
-                fwd_seq: "ACGTACGTACGTACGT".to_string(),
-                rev_seq: "TGCATGCATGCATGCA".to_string(),
-                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
-                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
-            },
-            ReadPair {
-                read_id: "read2".to_string(),
-                fwd_seq: "ACGTACGTACGTACGT".to_string(), // Duplicate
-                rev_seq: "TGCATGCATGCATGCA".to_string(),
-                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
-                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
-            },
-            ReadPair {
-                read_id: "read3".to_string(),
-                fwd_seq: "GGGGAAAACCCCTTTT".to_string(), // Different
-                rev_seq: "TTTTGGGGCCCCAAAA".to_string(),
-                fwd_qual: "IIIIIIIIIIIIIIII".to_string(),
-                rev_qual: "IIIIIIIIIIIIIIII".to_string(),
-            },
-        ];
-
         let mut ctx = DedupContext::new(dedup_params, minimizer_params);
 
-        for rp in read_pairs {
-            ctx.process_read(rp);
-        }
+        // Read 0: first sequence
+        ctx.process_read_by_index(
+            0,
+            "ACGTACGTACGTACGT".to_string(),
+            "TGCATGCATGCATGCA".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+        );
+        // Read 1: duplicate of read 0
+        ctx.process_read_by_index(
+            1,
+            "ACGTACGTACGTACGT".to_string(),
+            "TGCATGCATGCATGCA".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+        );
+        // Read 2: different sequence
+        ctx.process_read_by_index(
+            2,
+            "GGGGAAAACCCCTTTT".to_string(),
+            "TTTTGGGGCCCCAAAA".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+            "IIIIIIIIIIIIIIII".to_string(),
+        );
 
         ctx.finalize();
 
         let exemplar_indices = ctx.get_exemplar_indices();
 
-        // Should have 2 exemplars (one for cluster of read1/read2, one for read3)
+        // Should have 2 exemplars (one for cluster of read 0/read 1, one for read 2)
         assert_eq!(exemplar_indices.len(), 2);
 
-        // Exemplar indices should be 0 (for read1) and 2 (for read3)
+        // Exemplar indices should be 0 (for read 0) and 2 (for read 2)
         assert!(exemplar_indices.contains(&0) || exemplar_indices.contains(&1));
         assert!(exemplar_indices.contains(&2));
     }
@@ -1228,6 +1013,25 @@ mod tests {
 
         // Should panic because finalize() hasn't been called
         ctx.get_exemplar_indices();
+    }
+
+    #[test]
+    #[should_panic(expected = "get_exemplar_index must be called after finalize()")]
+    fn test_dedup_context_get_exemplar_index_before_finalize() {
+        let dedup_params = DedupParams::default();
+        let minimizer_params = MinimizerParams::default();
+
+        let mut ctx = DedupContext::new(dedup_params, minimizer_params);
+        ctx.process_read_by_index(
+            0,
+            "ACGT".to_string(),
+            "TGCA".to_string(),
+            "IIII".to_string(),
+            "IIII".to_string(),
+        );
+
+        // Should panic because finalize() hasn't been called
+        ctx.get_exemplar_index(0);
     }
 
     // ========================================================================
