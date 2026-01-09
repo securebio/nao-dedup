@@ -119,7 +119,7 @@ fn test_binary_basic_deduplication() {
     write_fastq_gz(input_file.path(), &records).unwrap();
 
     // Run the binary
-    let mut cmd = Command::cargo_bin("dedup_interleaved_fastq").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo_bin!("dedup_interleaved_fastq"));
     cmd.arg(input_file.path())
         .arg(output_file.path())
         .assert()
@@ -193,7 +193,7 @@ fn test_binary_all_unique() {
     write_fastq_gz(input_file.path(), &records).unwrap();
 
     // Run the binary
-    let mut cmd = Command::cargo_bin("dedup_interleaved_fastq").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo_bin!("dedup_interleaved_fastq"));
     cmd.arg(input_file.path())
         .arg(output_file.path())
         .assert()
@@ -236,7 +236,7 @@ fn test_binary_quality_selection() {
     write_fastq_gz(input_file.path(), &records).unwrap();
 
     // Run the binary
-    let mut cmd = Command::cargo_bin("dedup_interleaved_fastq").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo_bin!("dedup_interleaved_fastq"));
     cmd.arg(input_file.path())
         .arg(output_file.path())
         .assert()
@@ -290,7 +290,7 @@ fn test_binary_with_custom_params() {
     write_fastq_gz(input_file.path(), &records).unwrap();
 
     // Run with strict error threshold (should NOT deduplicate)
-    let mut cmd = Command::cargo_bin("dedup_interleaved_fastq").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo_bin!("dedup_interleaved_fastq"));
     cmd.arg(input_file.path())
         .arg(output_file1.path())
         .arg("--max-error-frac")
@@ -310,7 +310,7 @@ fn test_binary_with_custom_params() {
 
     // Run with looser error threshold (should deduplicate)
     let output_file2 = NamedTempFile::new().unwrap();
-    let mut cmd2 = Command::cargo_bin("dedup_interleaved_fastq").unwrap();
+    let mut cmd2 = Command::new(assert_cmd::cargo_bin!("dedup_interleaved_fastq"));
     cmd2.arg(input_file.path())
         .arg(output_file2.path())
         .arg("--max-error-frac")
@@ -340,7 +340,7 @@ fn test_binary_empty_input() {
     write_fastq_gz(input_file.path(), &[]).unwrap();
 
     // Run the binary
-    let mut cmd = Command::cargo_bin("dedup_interleaved_fastq").unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo_bin!("dedup_interleaved_fastq"));
     let assert = cmd
         .arg(input_file.path())
         .arg(output_file.path())
