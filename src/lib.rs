@@ -764,12 +764,21 @@ mod tests {
     // ========================================================================
 
     #[test]
-    fn test_minimizer_params_kmer_too_large() {
+    fn test_minimizer_params_kmer_larger_than_window() {
         let result = MinimizerParams::new(7, 5, 1);
         assert!(result.is_err());
         let err_msg = result.unwrap_err();
         assert!(err_msg.contains("kmer_len"));
         assert!(err_msg.contains("window_len"));
+    }
+
+    #[test]
+    fn test_minimizer_params_kmer_exceeds_32() {
+        // kmer_len > 32 is invalid (doesn't fit in 64-bit 2-bit encoding)
+        let result = MinimizerParams::new(33, 50, 3);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("k-mer length must be <= 32"));
     }
 
     #[test]
