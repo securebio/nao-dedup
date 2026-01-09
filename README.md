@@ -9,16 +9,6 @@ while being tolerant of small alignment shifts and sequencing errors. It uses
 minimizer-based bucketing for efficiency to avoid comparing every read pair
 against every other pair.
 
-This library is available in two implementations:
-- **Python**: Graph-based and streaming implementations for flexibility
-- **Rust**: Streaming-only, very high-performance
-
-In maintaining this library we keep the Rust and Python streaming versions
-completely in sync in terms of functionality.  This allows the Python version
-to serve as a reference (for both humans and LLMs) for what we intend to be
-doing, in part because our team is overall much stronger working in Python.
-
-
 ## Features
 
 - **Error-tolerant matching**: Identifies duplicates even when reads have small
@@ -29,132 +19,19 @@ doing, in part because our team is overall much stronger working in Python.
   against every other pair
 - **Quality-based selection**: Selects the highest quality read as the exemplar
   for each duplicate cluster
-- **Flexible orientation handling** (Python only): Can operate in strict mode
-  (same orientation required) or tolerant mode (handles mate-pair swaps). Rust
-  always uses tolerant mode.
-- **High performance**: Rust implementation is ~40x faster than Python, and
-  uses much less memory.
+- **Flexible orientation handling**: Handles mate-pair swaps.
+- **High performance**: Optimized for speed and memory efficiency.
 
 ---
 
-## Python Implementation
-
-### Installation
-
-#### Requirements
-
-- Python 3.8 or higher
-
-#### Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### Usage
-
-#### Choosing an Algorithm
-
-The Python implementation of `nao-dedup` provides two deduplication algorithms:
-
-1. **`deduplicate_read_pairs()`** - Graph-based algorithm
-   - **Best for**: Small to medium datasets (< 100k reads)
-   - **Advantages**: Uses graph centrality to select optimal exemplars
-   - **Memory usage**: Stores all reads in memory (~3GB for 250k reads)
-
-2. **`deduplicate_read_pairs_streaming()`** - Streaming two-pass algorithm
-   - **Best for**: Large datasets (> 100k reads)
-   - **Advantages**: Only stores unique sequences in memory (~2-3x less memory
-     in the typical case, far more on pathological datasets)
-   - **Memory usage**: Much lower (~1GB for 250k reads with 75k unique)
-   - **Quality**: Still selects high-quality representatives based on length
-     and quality
-
-#### Basic Example
-
-```python
-from dedup import ReadPair, deduplicate_read_pairs, DedupParams
-
-# Create read pairs
-read_pairs = [
-    ReadPair("read1", "ACGTACGT", "TGCATGCA", "IIIIIIII", "IIIIIIII"),
-    ReadPair("read2", "ACGTACGT", "TGCATGCA", "IIIIIIII", "IIIIIIII"),  # Duplicate
-    ReadPair("read3", "GGGGAAAA", "CCCCTTTT", "IIIIIIII", "IIIIIIII"),  # Different
-]
-
-# Run deduplication (graph-based)
-exemplar_mapping = deduplicate_read_pairs(read_pairs)
-
-# Or use streaming implementation for memory efficiency
-exemplar_mapping = deduplicate_read_pairs_streaming(read_pairs)
-
-# Check results
-for read_id, exemplar_id in exemplar_mapping.items():
-    print(f"{read_id} -> exemplar: {exemplar_id}")
-```
-
-#### Advanced Configuration
-
-```python
-from dedup import deduplicate_read_pairs_streaming, DedupParams, \
-                  MinimizerParams, ORIENT_TOLERANT
-
-# Configure deduplication parameters
-dedup_params = DedupParams(
-    max_offset=1,                # Maximum alignment shift in bases
-    max_error_frac=0.01,         # Maximum 1% mismatch rate
-    orientation=ORIENT_TOLERANT  # Allow swapped mate pairs
-)
-
-# Configure minimizer parameters (rarely needs changing)
-minimizer_params = MinimizerParams(
-    num_windows=3,    # Number of windows per read
-    window_len=25,    # Base pairs per window
-    kmer_len=7        # K-mer size for minimizers
-)
-
-# Run with custom parameters
-result = deduplicate_read_pairs(
-    read_pairs,
-    dedup_params=dedup_params,
-    minimizer_params=minimizer_params,
-    verbose=True
-)
-```
-
-### Python Parameters
-
-#### DedupParams
-
-- `max_offset` (default: 1): Maximum number of bases a read can be shifted and
-  still be considered a duplicate
-- `max_error_frac` (default: 0.01): Maximum fraction of mismatches allowed
-  (errors/overlap length)
-- `orientation` (default: `ORIENT_TOLERANT`): Either `ORIENT_STRICT` (F-R must
-  match F-R) or `ORIENT_TOLERANT` (also allows F-R to match R-F)
-
-#### MinimizerParams
-
-- `num_windows` (default: 3): Number of windows to extract from each read
-- `window_len` (default: 25): Size of each window in base pairs
-- `kmer_len` (default: 7): Size of k-mers for minimizer calculation
-
-**Note**: Rust uses different defaults (`kmer_len=15`, `num_windows=4`) because
-it's expected to handle much larger inputs where more selective minimizers
-reduce memory usage and comparisons.
-
----
-
-## Rust Implementation
+## Implementation
 
 ### Features
 
-- **High Performance**: Significantly faster than Python implementation
+- **High Performance**: Optimized Rust implementation
 - **Memory Efficient**: Only stores exemplar reads, not entire dataset
 - **Scalable**: Handles millions of reads efficiently
 - **Quality-Aware**: Uses sequence quality scores for exemplar selection
-- **Tolerant Orientation Only**: Always allows swapped mate pairs (no strict
-  orientation mode)
 
 ### API Overview
 
@@ -202,14 +79,13 @@ let (total_processed, unique_clusters) = ctx.stats();
 
 ### Integration Example
 
-See `post-processing/rust_dedup/src/similarity_duplicate_marking.rs` in
-https://github.com/securebio/nao-mgs-workflow for a complete example of how to
-integrate this library with TSV file I/O.
+See `src/dedup_interleaved_fastq.rs` for a complete example of how to integrate
+this library with file I/O.
 
 ### Performance
 
 **Large file (685K reads, 456K alignment-unique)**:
-- Rust: 127 seconds
+- Time: 127 seconds
 - Memory: 1.37 GB peak
 
 We balance memory and speed, storing only exemplar reads rather than the entire
@@ -313,7 +189,7 @@ used as a hash key:
 
 - **Fast**: Just bit shifts and ORs, much faster than CRC32 or polynomial hashing
 - **No collisions**: Bijective mapping for k-mers up to length 32 (fits in 64 bits)
-- **Consistent**: Python and Rust implementations produce identical hash values
+- **Consistent**: Deterministic encoding produces identical hash values
 - **DNA-aware**: Leverages the 4-base structure of DNA sequences
 
 K-mers containing non-ACGT bases (primarily N) return a sentinel value,
@@ -338,19 +214,9 @@ For example, with 3 windows of 25bp on a 150bp read:
 Read pairs with matching minimizers are assigned to the same buckets. This
 dramatically reduces the number of pairwise comparisons needed.
 
-**Python graph-based**:
-- All reads are assigned to buckets up front using tuple keys `(fwd_hash, rev_hash)`
-- Generates n² bucket keys per read (all combinations of forward and reverse minimizers)
-- Each read appears in multiple buckets
-- More precise bucketing with fewer collisions
-- Stores all reads in memory
-
-**Rust and Python streaming**:
 - Reads are processed one at a time
-- Uses individual minimizer hashes as keys (not tuples)
-- Generates 2n keys per read (just the minimizers from forward and reverse reads)
-- Simpler bucketing trades precision for memory efficiency
-- More bucket collisions are acceptable since full sequence comparison happens anyway
+- Uses individual minimizer hashes as keys
+- Generates 2n keys per read (the minimizers from forward and reverse reads)
 - Only stores unique exemplars, not all reads
 
 ### 3. Pairwise Comparison
@@ -359,19 +225,10 @@ Within each bucket, read pairs are compared to determine if they're
 duplicates. Comparison allows for:
 - Small alignment offsets (configurable via `max_offset`)
 - Sequencing errors (configurable via `max_error_frac`)
-- Mate-pair orientation swaps (always enabled in Rust; configurable via
-  `orientation` in Python)
+- Mate-pair orientation swaps (always enabled)
 
 ### 4. Clustering
 
-**Python graph-based**:
-- An equivalence graph is built where nodes are read pairs and edges connect
-  duplicates
-- Connected components in the graph represent duplicate clusters
-- For each cluster, an exemplar is selected based on graph centrality, quality
-  score, read length, and read ID
-
-**Rust and Python streaming**:
 - No graph construction - purely streaming approach
 - First read in a cluster identifies that cluster (becomes the cluster ID)
 - As reads are processed, the best read (by quality and length) becomes the exemplar
@@ -381,13 +238,7 @@ duplicates. Comparison allows for:
 
 ### 5. Exemplar Selection
 
-**Python graph-based** selects based on:
-1. Graph centrality (lower eccentricity is better)
-2. Mean quality score (higher is better)
-3. Total read length (longer is better)
-4. Read ID (lexicographic tie-breaker)
-
-**Rust/Python streaming** selects based on:
+Exemplars are selected based on:
 1. Mean quality score (higher is better)
 2. Total read length (longer is better)
 3. First read in cluster serves as tie-breaker
@@ -415,35 +266,27 @@ Verify installation:
 cargo --version
 ```
 
-### Python Dependencies
-
-For runtime dependencies:
-```bash
-pip install -r requirements.txt
-```
-
-For development and testing:
-```bash
-pip install -r requirements-dev.txt
-```
-
 ## Testing
 
-### Python and Rust tests
-
-Run all tests (Python and Rust implementations):
+Run all tests:
 
 ```bash
-pytest
+cargo test
 ```
 
-To ensure the Python and Rust implementations stay in sync, tests include:
+The test suite includes:
 
-- **Implementation parity tests**: Parametrized tests that run on both
-  streaming implementations to ensure they produce identical results for all
-  scenarios including edge cases with N's, offsets, and errors
-- **End-to-end tests**: Verify deduplication works correctly on realistic data
-  with various read configurations and quality scores
+- **Unit tests**: Located in `src/lib.rs` (inline tests), testing helper
+  functions, minimizer extraction, sequence matching, and parameter validation
+- **Integration tests**: Located in `tests/dedup_tests.rs`, testing the public
+  API with various deduplication scenarios including edge cases with N's,
+  offsets, and errors
+- **CLI tests**: Located in `tests/cli_tests.rs`, testing the command-line
+  binary with gzipped FASTQ files
 
-The Rust library is built automatically when tests are run if not already
-present.
+To run specific test suites:
+```bash
+cargo test --lib           # Unit tests only
+cargo test --test dedup_tests  # Integration tests
+cargo test --test cli_tests    # CLI tests
+```
