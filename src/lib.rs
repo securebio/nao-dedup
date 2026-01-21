@@ -97,11 +97,14 @@ struct StoredExemplar {
 // This allows fast rolling hash computation and comparison.
 // ============================================================================
 
+/// Sentinel value for invalid k-mer hashes (non-ACGT bases or empty windows).
+const INVALID_KMER_SENTINEL: u64 = u64::MAX;
+
 // Lookup table for base encoding (faster than match statement)
 // Maps ASCII byte values to 2-bit encodings: A/a=0, C/c=1, G/g=2, T/t=3
-// Invalid bases (including N) are marked with u64::MAX
+// Invalid bases (including N) are marked with INVALID_KMER_SENTINEL
 const ENCODE_LOOKUP: [u64; 256] = {
-    let mut table = [u64::MAX; 256];
+    let mut table = [INVALID_KMER_SENTINEL; 256];
     table[b'A' as usize] = 0;
     table[b'a' as usize] = 0;
     table[b'C' as usize] = 1;
@@ -116,7 +119,7 @@ const ENCODE_LOOKUP: [u64; 256] = {
 #[inline(always)]
 fn encode_base(b: u8) -> Option<u64> {
     let encoded = ENCODE_LOOKUP[b as usize];
-    if encoded == u64::MAX {
+    if encoded == INVALID_KMER_SENTINEL {
         None
     } else {
         Some(encoded)
@@ -161,7 +164,7 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> SmallVec<[u64; 8]>
             break;
         }
 
-        let mut min_hash = u64::MAX;
+        let mut min_hash = INVALID_KMER_SENTINEL;
         let mut hash: u64 = 0;
         let mut valid_len: usize = 0;  // number of consecutive valid ACGT bases
 
@@ -181,7 +184,7 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> SmallVec<[u64; 8]>
             }
         }
 
-        if min_hash != u64::MAX {
+        if min_hash != INVALID_KMER_SENTINEL {
             minimizers.push(min_hash);
         }
     }
@@ -513,9 +516,6 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
-    // Sentinel value for empty k-mer windows
-    const EMPTY_KMER_SENTINEL_HASH: u64 = u64::MAX;
-
     /// Generate a random DNA sequence of specified length
     fn random_seq(length: usize, rng: &mut StdRng) -> String {
         const BASES: &[u8] = b"ACGT";
@@ -642,7 +642,7 @@ mod tests {
 
         let mins = extract_minimizers(seq, &params);
         assert_eq!(mins.len(), 1);
-        assert_ne!(mins[0], EMPTY_KMER_SENTINEL_HASH);
+        assert_ne!(mins[0], INVALID_KMER_SENTINEL);
     }
 
     #[test]
