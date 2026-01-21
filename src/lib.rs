@@ -315,6 +315,8 @@ pub struct DedupContext {
     // minimizer -> list of read indices
     // FxHashMap for integer keys: u64 keys are well-distributed,
     // so we use ultra-fast FxHash (just a multiply + XOR)
+    // TODO(#13): consider moving to something that doesn't have a performance
+    // cliff at ~2^26 keys.
     buckets: FxHashMap<u64, Vec<u32>>,
 
     // read_idx -> read sequences (only for exemplars, quality strings omitted)
