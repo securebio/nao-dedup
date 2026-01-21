@@ -26,16 +26,9 @@ against every other pair.
 
 ## Implementation
 
-### Features
-
-- **High Performance**: Optimized Rust implementation
-- **Memory Efficient**: Only stores exemplar reads, not entire dataset
-- **Scalable**: Handles millions of reads efficiently
-- **Quality-Aware**: Uses sequence quality scores for exemplar selection
-
 ### API Overview
 
-The Rust library is designed as a stateful context that processes reads using
+The library is designed as a stateful context that processes reads using
 an index-based API:
 
 #### Pass 1: Process Reads
