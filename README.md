@@ -106,11 +106,17 @@ cargo build --release
 
 ### API Overview
 
-The library takes two passes over the input: first clustering reads as they
-stream in, then resolving each read to its cluster's best exemplar. Reads are
-tracked by their linear position in the input rather than by sequence ID.
+#### Requirements
 
-#### Pass 1: Process Reads
+- **Contiguous indices**: Pass reads with indices 0, 1, 2, ... for memory
+  efficiency. Sparse indices work but waste memory.
+- **Unique indices**: Each index must be used exactly once.
+- **Finalize before querying**: You must call `finalize()` before calling
+  `get_exemplar_index()` or `get_exemplar_indices()`.
+
+Sequences can be upper or lowercase (both are handled).
+
+#### Usage
 
 ```rust
 use nao_dedup::{DedupContext, DedupParams, MinimizerParams};
@@ -120,38 +126,30 @@ let dedup_params = DedupParams::default();
 let minimizer_params = MinimizerParams::default();
 let mut ctx = DedupContext::new(dedup_params, minimizer_params);
 
-// Process each read by index
+// Process each read pair by index
 ctx.process_read_by_index(
-    0,  // read index
-    "ACGTACGT".to_string(),  // forward sequence
-    "TGCATGCA".to_string(),  // reverse sequence
-    "IIIIIIII".to_string(),  // forward quality
-    "IIIIIIII".to_string(),  // reverse quality
+    0,                        // read index
+    "ACGTACGT".to_string(),   // forward sequence
+    "TGCATGCA".to_string(),   // reverse sequence
+    "IIIIIIII".to_string(),   // forward quality (Phred+33)
+    "IIIIIIII".to_string(),   // reverse quality (Phred+33)
 );
 ctx.process_read_by_index(
     1,
-    "ACGTACGT".to_string(),  // duplicate of read 0
+    "ACGTACGT".to_string(),   // duplicate of read 0
     "TGCATGCA".to_string(),
     "IIIIIIII".to_string(),
     "IIIIIIII".to_string(),
 );
-```
 
-#### Pass 2: Finalize
-
-```rust
-// Finalize to resolve all reads to their cluster's best exemplar
+// Finalize before querying
 ctx.finalize();
-```
 
-#### Query Results
-
-```rust
-// After finalization, query exemplar indices
+// Query results
 let exemplar_idx = ctx.get_exemplar_index(0);  // Returns 0 (itself)
 let exemplar_idx = ctx.get_exemplar_index(1);  // Returns 0 (clustered with read 0)
 
-// Get set of all exemplar indices (for filtering)
+// Get set of all exemplar indices (for filtering output)
 let exemplar_indices = ctx.get_exemplar_indices();
 
 // Get statistics
@@ -166,6 +164,26 @@ this library with file I/O.
 ---
 
 ## How It Works
+
+### Two-Pass Architecture
+
+The library processes input in two passes:
+
+**Pass 1 (Clustering)**: Reads stream in one at a time. Each read is compared
+against existing cluster exemplars using minimizer-based bucketing. If it
+matches an existing cluster, it joins that cluster; otherwise it starts a new
+cluster. The library tracks the best read (by quality) seen so far in each
+cluster, but during this pass each read's result points to its *cluster leader*
+(the first read that started the cluster), not the current best.
+
+**Pass 2 (Finalization)**: After all reads are processed, the library resolves
+each read's assignment from the cluster leader to the cluster's *best exemplar*.
+This second pass is necessary because the best read in a cluster can change as
+new reads arrive, and we can't update previously-processed reads during
+streaming.
+
+Reads are tracked by their linear position (index) rather than by sequence ID,
+avoiding string allocation and hash lookups.
 
 ### 1. Minimizer Extraction
 
