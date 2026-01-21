@@ -1,36 +1,114 @@
 # nao-dedup
 
-Sequencing read deduplication with error-tolerant matching
+Sequencing read deduplication with error-tolerant matching.
 
-## Overview
+This repository provides two things:
 
-`nao-dedup` identifies and removes duplicate read pairs from sequencing data
-while being tolerant of small alignment shifts and sequencing errors. It uses
-minimizer-based bucketing for efficiency to avoid comparing every read pair
-against every other pair.
+1. **Command-line tool**: Deduplicates interleaved FASTQ.gz files directly
+2. **Rust library**: For integrating deduplication into other Rust programs
+
+Both use minimizer-based bucketing for efficiency and tolerate small alignment
+shifts and sequencing errors.
 
 ## Features
 
-- **Error-tolerant matching**: Identifies duplicates even when reads have small
-  differences due to sequencing errors
-- **Alignment shift tolerance**: Handles reads that are slightly offset from
-  each other
-- **Efficient bucketing**: Uses minimizers to avoid comparing every read pair
-  against every other pair
-- **Quality-based selection**: Selects the highest quality read as the exemplar
-  for each duplicate cluster
-- **Flexible orientation handling**: Handles mate-pair swaps.
-- **High performance**: Optimized for speed and memory efficiency.
+- **Error-tolerant matching**: Identifies duplicates even with sequencing errors
+- **Alignment shift tolerance**: Handles reads that are slightly offset
+- **Efficient bucketing**: Uses minimizers to avoid O(n²) comparisons
+- **Quality-based selection**: Keeps the highest quality read from each cluster
+- **Mate-pair swap handling**: Detects duplicates regardless of orientation
 
 ---
 
-## Implementation
+## Command-Line Tool
+
+The quickest way to deduplicate your FASTQ files.
+
+### Building
+
+```bash
+cargo build --release --bin dedup_interleaved_fastq
+```
+
+The binary will be at `target/release/dedup_interleaved_fastq`.
+
+### Usage
+
+Basic usage:
+
+```bash
+./target/release/dedup_interleaved_fastq input.fastq.gz output.fastq.gz
+```
+
+With custom parameters:
+
+```bash
+./target/release/dedup_interleaved_fastq \
+  --max-offset 2 \
+  --max-error-frac 0.02 \
+  --kmer-len 15 \
+  --window-len 25 \
+  --num-windows 4 \
+  input.fastq.gz output.fastq.gz
+```
+
+View all options:
+
+```bash
+./target/release/dedup_interleaved_fastq --help
+```
+
+### Input Format
+
+Expects interleaved paired-end FASTQ files where R1 and R2 reads alternate
+(R1, R2, R1, R2, ...). The input file must be gzip-compressed.
+
+The input file must not be streamed, because we process it in two passes. So
+you can't do:
+
+```bash
+./target/release/dedup_interleaved_fastq \
+    <(aws s3 cp s3://.../input.fastq.gz -) output.fastq.gz
+```
+
+### Output
+
+The output file contains only the exemplar read pairs (one representative per
+duplicate cluster), maintaining the interleaved format.
+
+### Parameters
+
+- `--max-offset`: Maximum alignment offset in bases (default: 1)
+- `--max-error-frac`: Maximum error fraction allowed (default: 0.01)
+- `--kmer-len`: K-mer length for minimizers (default: 15)
+- `--window-len`: Window length for minimizers (default: 25)
+- `--num-windows`: Number of windows per read (default: 4)
+
+### Performance
+
+**Large file (685K reads, 456K alignment-unique)**:
+- Time: 127 seconds
+- Memory: 1.37 GB peak
+
+Single-threaded; we parallelize by running multiple files concurrently.
+
+---
+
+## Rust Library
+
+For integrating deduplication into your own Rust programs.
+
+### Building
+
+```bash
+cargo build --release
+```
 
 ### API Overview
 
-The library takes two passes over the input, first clustering reads as they
-come in, and identifying the exemplar for each cluster.  Instead of tracking
-sequences by sequence ID, it just uses their linear position in the input.
+The library takes two passes over the input: first clustering reads as they
+stream in, then resolving each read to its cluster's best exemplar. Reads are
+tracked by their linear position in the input rather than by sequence ID.
 
 #### Pass 1: Process Reads
 
@@ -62,7 +140,7 @@ ctx.process_read_by_index(
 #### Pass 2: Finalize
 
 ```rust
-// Finalize to build final exemplar mappings
+// Finalize to resolve all reads to their cluster's best exemplar
 ctx.finalize();
 ```
 
@@ -85,89 +163,7 @@ let (total_processed, unique_clusters) = ctx.stats();
 See `src/dedup_interleaved_fastq.rs` for a complete example of how to integrate
 this library with file I/O.
 
-### Performance
-
-**Large file (685K reads, 456K alignment-unique)**:
-- Time: 127 seconds
-- Memory: 1.37 GB peak
-
-We balance memory and speed, storing only exemplar reads rather than the entire
-dataset.
-
-Note that this is single-threaded performance.  One could do even better with
-more cores, but instead we just mark duplicates on multiple files in parallel.
-
-### Building
-
-The library is a standard Rust crate. Build with:
-
-```bash
-cargo build --release
-```
-
-### Command-Line Binary
-
-A command-line tool for deduplicating interleaved FASTQ.gz files is included.
-
-#### Building
-
-```bash
-cargo build --release --bin dedup_interleaved_fastq
-```
-
-The binary will be created at `target/release/dedup_interleaved_fastq`.
-
-#### Usage
-
-Basic usage with default parameters:
-
-```bash
-./target/release/dedup_interleaved_fastq input.fastq.gz output.fastq.gz
-```
-
-With custom parameters:
-
-```bash
-./target/release/dedup_interleaved_fastq \
-  --max-offset 2 \
-  --max-error-frac 0.02 \
-  --kmer-len 15 \
-  --window-len 25 \
-  --num-windows 4 \
-  input.fastq.gz output.fastq.gz
-```
-
-View all options:
-
-```bash
-./target/release/dedup_interleaved_fastq --help
-```
-
-#### Input Format
-
-The binary expects interleaved paired-end FASTQ files where R1 and R2 reads
-alternate (R1, R2, R1, R2, ...). The input file must be gzip-compressed.
-
-The input file must not be streamed, because we process it in two passes.  So
-you can't do:
-
-```bash
-./target/release/dedup_interleaved_fastq \
-    <(aws s3 cp s3://.../input.fastq.gz -) output.fastq.gz
-```
-
-#### Output
-
-The output file contains only the exemplar read pairs (one representative per
-duplicate cluster), maintaining the interleaved format.
-
-#### Parameters
-
-- `--max-offset`: Maximum alignment offset in bases (default: 1)
-- `--max-error-frac`: Maximum error fraction allowed (default: 0.01)
-- `--kmer-len`: K-mer length for minimizers (default: 15)
-- `--window-len`: Window length for minimizers (default: 25)
-- `--num-windows`: Number of windows per read (default: 4)
+---
 
 ## How It Works
 
