@@ -28,8 +28,9 @@ against every other pair.
 
 ### API Overview
 
-The library is designed as a stateful context that processes reads using
-an index-based API:
+The library takes two passes over the input, first clustering reads as they
+come in, and identifying the exemplar for each cluster.  Instead of tracking
+sequences by sequence ID, it just uses their linear position in the input.
 
 #### Pass 1: Process Reads
 
@@ -93,9 +94,8 @@ this library with file I/O.
 We balance memory and speed, storing only exemplar reads rather than the entire
 dataset.
 
-Note that this is single-threaded performance.  We ought to be able to do even
-better with more cores, though in practice we just mark duplicates on multiple
-files in parallel.
+Note that this is single-threaded performance.  One could do even better with
+more cores, but instead we just mark duplicates on multiple files in parallel.
 
 ### Building
 
@@ -159,13 +159,7 @@ you can't do:
 #### Output
 
 The output file contains only the exemplar read pairs (one representative per
-duplicate cluster), maintaining the interleaved format. The binary performs
-two passes:
-
-1. **Pass 1**: Reads all pairs and builds the deduplication index
-2. **Pass 2**: Writes only exemplar pairs to the output file
-
-Progress is reported during both passes, along with deduplication statistics.
+duplicate cluster), maintaining the interleaved format.
 
 #### Parameters
 
@@ -200,7 +194,7 @@ ensuring they won't be selected as minimizers.
 #### Window Placement
 
 Windows are placed adjacently starting from the beginning of each read
-(positions 0, window_len, 2×window_len, etc.). This strategy:
+(positions 0, window_len, 2× window_len, etc.). This strategy:
 - Focuses on the most stable region of reads (the beginning)
 - Avoids the tail region, which is most likely to be trimmed or contain
   sequencing errors
@@ -232,11 +226,12 @@ duplicates. Comparison allows for:
 ### 4. Clustering
 
 - No graph construction - purely streaming approach
-- First read in a cluster identifies that cluster (becomes the cluster ID)
-- As reads are processed, the best read (by quality and length) becomes the exemplar
-- Subsequent reads matching the cluster are compared against the current exemplar
+- First read in a cluster identifies that cluster (becomes the cluster leader)
+- As reads are processed, the best read (by quality and length) becomes the
+  exemplar
+- Subsequent reads matching the cluster are compared against the current
+  exemplar
 - If a better read is found, it replaces the previous exemplar
-- Two-pass algorithm: Pass 1 processes reads and builds index, Pass 2 finalizes exemplar mappings
 
 ### 5. Exemplar Selection
 
