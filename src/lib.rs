@@ -1,4 +1,4 @@
-use ahash::{AHashMap, AHashSet};
+use ahash::AHashSet;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
@@ -7,10 +7,6 @@ use smallvec::SmallVec;
 // ============================================================================
 
 /// Parameters for deduplication matching.
-///
-/// Note: for simplicity, the Rust implementation always uses tolerant
-/// orientation matching (allows swapped mate pairs). Unlike the Python
-/// implementation, there is no strict orientation mode.
 #[derive(Debug, Clone)]
 pub struct DedupParams {
     pub max_offset: usize,
@@ -27,10 +23,6 @@ impl Default for DedupParams {
 }
 
 /// Parameters for minimizer extraction.
-///
-/// Note: The Rust defaults (kmer_len=15, num_windows=4) differ from Python
-/// (kmer_len=7, num_windows=3) because Rust is expected to handle much larger
-/// inputs where more selective minimizers reduce memory usage and comparisons.
 #[derive(Debug, Clone)]
 pub struct MinimizerParams {
     pub kmer_len: usize,
@@ -72,30 +64,21 @@ impl Default for MinimizerParams {
 }
 
 // ============================================================================
-// Read Pair
+// Helper Functions
 // ============================================================================
-
-#[derive(Debug, Clone)]
-pub struct ReadPair {
-    pub read_id: String,
-    pub fwd_seq: String,
-    pub rev_seq: String,
-    pub fwd_qual: String,
-    pub rev_qual: String,
-}
 
 /// Calculate mean quality score from forward and reverse quality strings.
 fn mean_quality(fwd_qual: &str, rev_qual: &str) -> f64 {
-    let total: u32 = fwd_qual.bytes().chain(rev_qual.bytes())
+    let total: u32 = fwd_qual
+        .bytes()
+        .chain(rev_qual.bytes())
         .map(|b| (b - 33) as u32)
         .sum();
     let count = (fwd_qual.len() + rev_qual.len()) as f64;
-    if count == 0.0 { 0.0 } else { total as f64 / count }
-}
-
-impl ReadPair {
-    pub fn mean_quality(&self) -> f64 {
-        mean_quality(&self.fwd_qual, &self.rev_qual)
+    if count == 0.0 {
+        0.0
+    } else {
+        total as f64 / count
     }
 }
 
@@ -107,39 +90,6 @@ struct StoredExemplar {
     rev_seq: String,
 }
 
-/// ID registry for interning read IDs to compact u32 indices.
-/// Dramatically reduces memory usage and improves hash/comparison performance.
-struct IDRegistry {
-    id_to_index: AHashMap<String, u32>,
-    index_to_id: Vec<String>,
-}
-
-impl IDRegistry {
-    fn new() -> Self {
-        Self {
-            id_to_index: AHashMap::new(),
-            index_to_id: Vec::new(),
-        }
-    }
-
-    /// Get or create an index for a read ID
-    fn get_or_create(&mut self, id: &str) -> u32 {
-        if let Some(&idx) = self.id_to_index.get(id) {
-            return idx;
-        }
-        let idx = self.index_to_id.len() as u32;
-        self.index_to_id.push(id.to_string());
-        self.id_to_index.insert(id.to_string(), idx);
-        idx
-    }
-
-    /// Convert index back to read ID
-    #[inline]
-    fn get_id(&self, idx: u32) -> &str {
-        &self.index_to_id[idx as usize]
-    }
-}
-
 // ============================================================================
 // Minimizer Extraction
 //
@@ -147,11 +97,14 @@ impl IDRegistry {
 // This allows fast rolling hash computation and comparison.
 // ============================================================================
 
+/// Sentinel value for invalid k-mer hashes (non-ACGT bases or empty windows).
+const INVALID_KMER_SENTINEL: u64 = u64::MAX;
+
 // Lookup table for base encoding (faster than match statement)
 // Maps ASCII byte values to 2-bit encodings: A/a=0, C/c=1, G/g=2, T/t=3
-// Invalid bases (including N) are marked with u64::MAX
+// Invalid bases (including N) are marked with INVALID_KMER_SENTINEL
 const ENCODE_LOOKUP: [u64; 256] = {
-    let mut table = [u64::MAX; 256];
+    let mut table = [INVALID_KMER_SENTINEL; 256];
     table[b'A' as usize] = 0;
     table[b'a' as usize] = 0;
     table[b'C' as usize] = 1;
@@ -166,7 +119,7 @@ const ENCODE_LOOKUP: [u64; 256] = {
 #[inline(always)]
 fn encode_base(b: u8) -> Option<u64> {
     let encoded = ENCODE_LOOKUP[b as usize];
-    if encoded == u64::MAX {
+    if encoded == INVALID_KMER_SENTINEL {
         None
     } else {
         Some(encoded)
@@ -197,8 +150,6 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> SmallVec<[u64; 8]>
 
 
     // Use adjacent windows starting from the beginning of the read
-    // This matches Python's strategy: window i covers
-    // [i*window_len, (i+1)*window_len]
     for i in 0..params.num_windows {
         let window_start = i * params.window_len;
 
@@ -213,7 +164,7 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> SmallVec<[u64; 8]>
             break;
         }
 
-        let mut min_hash = u64::MAX;
+        let mut min_hash = INVALID_KMER_SENTINEL;
         let mut hash: u64 = 0;
         let mut valid_len: usize = 0;  // number of consecutive valid ACGT bases
 
@@ -233,7 +184,7 @@ fn extract_minimizers(seq: &str, params: &MinimizerParams) -> SmallVec<[u64; 8]>
             }
         }
 
-        if min_hash != u64::MAX {
+        if min_hash != INVALID_KMER_SENTINEL {
             minimizers.push(min_hash);
         }
     }
@@ -309,13 +260,13 @@ fn check_similarity(
 
 /// Check if two read pairs are similar enough to be duplicates.
 ///
-/// Checks two orientations (matching Python's ORIENT_TOLERANT mode):
+/// Checks two orientations:
 /// 1. Standard: (Fwd, Rev) vs (Fwd, Rev)
 /// 2. Swapped: (Fwd, Rev) vs (Rev, Fwd)
 ///
 /// The swapped check handles the case where adapters attached in the opposite
 /// orientation, causing the same DNA fragment to be sequenced with forward/reverse
-/// swapped. Note: Rust version always uses tolerant mode (no strict mode option).
+/// swapped.
 fn reads_are_similar(
     fwd_seq: &str,
     rev_seq: &str,
@@ -361,14 +312,11 @@ pub struct DedupContext {
     dedup_params: DedupParams,
     minimizer_params: MinimizerParams,
 
-    // ID interning: read IDs -> compact u32 indices for faster hashing/comparison
-    id_registry: IDRegistry,
-
-    // HashMap choices:
-    // - FxHashMap for integer keys: u64/u32 keys are well-distributed
-    //   integers, so we can use the ultra-fast FxHash (just a multiply + XOR)
-
-    // minimizer -> list of read indices (instead of read IDs)
+    // minimizer -> list of read indices
+    // FxHashMap for integer keys: u64 keys are well-distributed,
+    // so we use ultra-fast FxHash (just a multiply + XOR)
+    // TODO(#13): consider moving to something that doesn't have a performance
+    // cliff at ~2^26 keys.
     buckets: FxHashMap<u64, Vec<u32>>,
 
     // read_idx -> read sequences (only for exemplars, quality strings omitted)
@@ -388,7 +336,6 @@ impl DedupContext {
         Self {
             dedup_params,
             minimizer_params,
-            id_registry: IDRegistry::new(),
             buckets: FxHashMap::default(),
             exemplar_store: Vec::new(),
             results: Vec::new(),
@@ -504,27 +451,6 @@ impl DedupContext {
         cluster_leader_idx
     }
 
-    /// Process one read pair. Returns the cluster ID it was assigned to.
-    ///
-    /// This method interns the read ID to an index and delegates to
-    /// process_read_by_index. See that method for algorithm details.
-    pub fn process_read(&mut self, read_pair: ReadPair) -> String {
-        // Intern the read ID to a compact u32 index
-        let read_idx = self.id_registry.get_or_create(&read_pair.read_id);
-
-        // Delegate to the index-based implementation
-        let cluster_leader_idx = self.process_read_by_index(
-            read_idx as usize,
-            read_pair.fwd_seq,
-            read_pair.rev_seq,
-            read_pair.fwd_qual,
-            read_pair.rev_qual,
-        );
-
-        // Return the cluster leader's ID (as a String)
-        self.id_registry.get_id(cluster_leader_idx).to_string()
-    }
-
     /// Finalize results: resolve all reads to their cluster's best_read_idx.
     ///
     /// During streaming, reads point to the cluster leader index (first exemplar).
@@ -543,15 +469,6 @@ impl DedupContext {
         // Free memory for intermediate data structures
         self.buckets.clear();
         self.exemplar_store.clear();
-    }
-
-    pub fn get_cluster_id(&self, read_id: &str) -> String {
-        if let Some(&read_idx) = self.id_registry.id_to_index.get(read_id) {
-            if let Some(&cluster_idx) = self.results.get(read_idx as usize) {
-                return self.id_registry.get_id(cluster_idx).to_string();
-            }
-        }
-        read_id.to_string()
     }
 
     pub fn stats(&self) -> (usize, usize) {
@@ -577,36 +494,408 @@ impl DedupContext {
             .map(|stats| stats.best_read_idx as usize)
             .collect()
     }
+
+    /// Get the exemplar index for a given read index.
+    ///
+    /// Must be called after finalize(). Returns the index of the best read
+    /// in the cluster that this read belongs to.
+    pub fn get_exemplar_index(&self, read_idx: usize) -> usize {
+        assert!(
+            self.finalized,
+            "get_exemplar_index must be called after finalize()"
+        );
+        self.results[read_idx] as usize
+    }
 }
 
 // ============================================================================
-// Public API
+// Tests
 // ============================================================================
 
-pub fn deduplicate_read_pairs(
-    read_pairs: Vec<ReadPair>,
-    dedup_params: Option<DedupParams>,
-    minimizer_params: Option<MinimizerParams>,
-) -> AHashMap<String, String> {
-    let dedup_params = dedup_params.unwrap_or_default();
-    let minimizer_params = minimizer_params.unwrap_or_default();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
-    let mut ctx = DedupContext::new(dedup_params, minimizer_params);
-
-    for rp in read_pairs {
-        ctx.process_read(rp);
+    /// Generate a random DNA sequence of specified length
+    fn random_seq(length: usize, rng: &mut StdRng) -> String {
+        const BASES: &[u8] = b"ACGT";
+        (0..length)
+            .map(|_| BASES[rng.gen_range(0..4)] as char)
+            .collect()
     }
 
-    ctx.finalize();
-
-    // Convert internal index-based results to HashMap<String, String> for public API
-    let mut result_map = AHashMap::with_capacity(ctx.results.len());
-    for read_idx in 0..ctx.results.len() {
-        let cluster_idx = ctx.results[read_idx];
-        let read_id = ctx.id_registry.get_id(read_idx as u32);
-        let cluster_id = ctx.id_registry.get_id(cluster_idx);
-        result_map.insert(read_id.to_string(), cluster_id.to_string());
+    /// Reverse complement a DNA sequence
+    fn reverse_complement(seq: &str) -> String {
+        seq.chars()
+            .rev()
+            .map(|c| match c {
+                'A' | 'a' => 'T',
+                'T' | 't' => 'A',
+                'C' | 'c' => 'G',
+                'G' | 'g' => 'C',
+                'N' | 'n' => 'N',
+                _ => c,
+            })
+            .collect()
     }
 
-    result_map
+    /// Count mismatches between two sequences (compares only up to shorter length)
+    fn mismatch_count(seq1: &str, seq2: &str) -> usize {
+        seq1.chars()
+            .zip(seq2.chars())
+            .filter(|(a, b)| a != b)
+            .count()
+    }
+
+    // ========================================================================
+    // Helper Functions Tests
+    // ========================================================================
+
+    #[test]
+    fn test_reverse_complement_standard_bases() {
+        assert_eq!(reverse_complement("ACGT"), "ACGT");
+        assert_eq!(reverse_complement("AAAA"), "TTTT");
+        assert_eq!(reverse_complement("TTTT"), "AAAA");
+        assert_eq!(reverse_complement("GCGC"), "GCGC");
+    }
+
+    #[test]
+    fn test_reverse_complement_with_n() {
+        assert_eq!(reverse_complement("ACGTN"), "NACGT");
+        assert_eq!(reverse_complement("NNNNN"), "NNNNN");
+    }
+
+    #[test]
+    fn test_mismatch_count_equal_length() {
+        assert_eq!(mismatch_count("AAAA", "AAAA"), 0);
+        assert_eq!(mismatch_count("AAAA", "TTTT"), 4);
+        assert_eq!(mismatch_count("AAAA", "AAAT"), 1);
+        assert_eq!(mismatch_count("ACGT", "TGCA"), 4);
+    }
+
+    #[test]
+    fn test_mismatch_count_unequal_length() {
+        // Truncates to shorter length
+        assert_eq!(mismatch_count("AAAA", "AA"), 0); // Only compares first 2
+        assert_eq!(mismatch_count("AA", "AAAA"), 0); // Only compares first 2
+        assert_eq!(mismatch_count("AAAA", "TT"), 2); // Compares first 2, both differ
+        assert_eq!(mismatch_count("AAAT", "TT"), 2); // AA vs TT
+    }
+
+    // ========================================================================
+    // Minimizer Extraction Tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_minimizer_normal_window() {
+        let params = MinimizerParams::new(7, 20, 2).unwrap();
+        let seq = format!("{}{}", "A".repeat(20), "C".repeat(20)); // 40bp sequence
+
+        // Test first window (all A's - should give consistent result)
+        let minimizers1 = extract_minimizers(&seq, &params);
+        let minimizers2 = extract_minimizers(&seq, &params);
+        assert_eq!(minimizers1.len(), 2);
+        assert_eq!(minimizers1[0], minimizers2[0]); // Should be deterministic
+
+        // Different windows should give different results
+        assert_ne!(minimizers1[0], minimizers1[1]);
+    }
+
+    #[test]
+    fn test_extract_minimizer_with_n_bases() {
+        let params = MinimizerParams::new(3, 10, 1).unwrap();
+        let seq_with_n = "AANAAAANAA";
+        let seq_without_n = "AAGAAAAGAA";
+
+        let mins_with_n = extract_minimizers(seq_with_n, &params);
+        let mins_without_n = extract_minimizers(seq_without_n, &params);
+
+        // Should skip N-containing kmers and find valid ones
+        assert!(!mins_with_n.is_empty());
+        assert!(!mins_without_n.is_empty());
+    }
+
+    #[test]
+    fn test_extract_minimizer_window_too_short() {
+        let params = MinimizerParams::new(7, 10, 1).unwrap();
+        let seq = "AAAAA"; // 5bp sequence, need 7bp kmer
+
+        let mins = extract_minimizers(seq, &params);
+        assert!(mins.is_empty());
+    }
+
+    #[test]
+    fn test_extract_minimizer_sequence_too_short() {
+        // Collected windows longer than sequence, should not add sentinels (Rust behavior)
+        let params = MinimizerParams::new(7, 10, 2).unwrap();
+        let seq = "AAAAACCGGTT"; // 11bp sequence, second window is too short
+
+        let mins = extract_minimizers(seq, &params);
+        // Rust returns only the first window's minimizer, skips the second
+        assert_eq!(mins.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_minimizer_sequence_matches_window_matches_kmer() {
+        let params = MinimizerParams::new(11, 11, 1).unwrap();
+        let seq = "AAAAACCGGTT"; // 11bp sequence
+
+        let mins = extract_minimizers(seq, &params);
+        assert_eq!(mins.len(), 1);
+        assert_ne!(mins[0], INVALID_KMER_SENTINEL);
+    }
+
+    #[test]
+    fn test_extract_minimizer_all_n_window() {
+        let params = MinimizerParams::new(3, 10, 1).unwrap();
+        let seq = "NNNNNNNNNN";
+
+        let mins = extract_minimizers(seq, &params);
+        assert!(mins.is_empty()); // Rust skips N-only windows
+    }
+
+    // ========================================================================
+    // Sequence Matching Tests
+    // ========================================================================
+
+    #[test]
+    fn test_sequences_match_exact() {
+        let params = DedupParams {
+            max_offset: 1,
+            max_error_frac: 0.01,
+        };
+
+        assert!(check_similarity("AAAA", "AAAA", params.max_offset, params.max_error_frac));
+        assert!(check_similarity("ACGT", "ACGT", params.max_offset, params.max_error_frac));
+    }
+
+    #[test]
+    fn test_sequences_match_with_offset_1() {
+        let params = DedupParams {
+            max_offset: 1,
+            max_error_frac: 0.25,
+        };
+        // need a large max_error_frac; for short test seqs, an offset of 1 is a large relative error
+
+        // Left shift: XAAAA vs AAAA (X removed)
+        assert!(check_similarity("GAAAA", "AAAA", params.max_offset, params.max_error_frac));
+        // Right shift: AAAA vs XAAAA (X added at start)
+        assert!(check_similarity("AAAA", "GAAAA", params.max_offset, params.max_error_frac));
+    }
+
+    #[test]
+    fn test_sequences_match_no_match_large_offset() {
+        let params = DedupParams {
+            max_offset: 1,
+            max_error_frac: 0.01,
+        };
+
+        // Should not match with offset > 1
+        assert!(!check_similarity("GGAAAA", "AAAA", params.max_offset, params.max_error_frac));
+        assert!(!check_similarity("AAAA", "GGAAAA", params.max_offset, params.max_error_frac));
+    }
+
+    #[test]
+    fn test_sequences_error_threshold() {
+        let params = DedupParams {
+            max_offset: 0,
+            max_error_frac: 0.1,
+        }; // 10% error allowed
+
+        // 1 error in 10bp = 10% error rate
+        assert!(check_similarity("AAAAAAAAAA", "AAAAAAAAAG", params.max_offset, params.max_error_frac));
+        // 2 errors in 10bp = 20% error rate (should fail)
+        assert!(!check_similarity("AAAAAAAAAA", "AAAAAAAGGG", params.max_offset, params.max_error_frac));
+    }
+
+    #[test]
+    fn test_read_pairs_equivalent_standard_orientation() {
+        let params = DedupParams {
+            max_offset: 1,
+            max_error_frac: 0.01,
+        };
+
+        let exemplar1 = StoredExemplar {
+            fwd_seq: "AAAA".to_string(),
+            rev_seq: "TTTT".to_string(),
+        };
+        let exemplar2 = StoredExemplar {
+            fwd_seq: "AAAA".to_string(),
+            rev_seq: "CCCC".to_string(),
+        };
+
+        assert!(reads_are_similar("AAAA", "TTTT", &exemplar1, &params));
+        assert!(!reads_are_similar("AAAA", "TTTT", &exemplar2, &params));
+    }
+
+    #[test]
+    fn test_read_pairs_equivalent_no_match() {
+        let params = DedupParams {
+            max_offset: 1,
+            max_error_frac: 0.01,
+        };
+
+        let exemplar = StoredExemplar {
+            fwd_seq: "GGGG".to_string(),
+            rev_seq: "CCCC".to_string(),
+        };
+
+        assert!(!reads_are_similar("AAAA", "TTTT", &exemplar, &params));
+    }
+
+    // ========================================================================
+    // Quality Calculation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_mean_qual_calculation() {
+        // Phred 33: '!' = 0, 'I' = 40
+        let expected_mean = (0.0 + 0.0 + 0.0 + 0.0 + 40.0 + 40.0 + 40.0 + 40.0) / 8.0;
+        assert_eq!(mean_quality("!!!!", "IIII"), expected_mean);
+    }
+
+    #[test]
+    fn test_mean_qual_empty_qualities() {
+        assert_eq!(mean_quality("", ""), 0.0);
+    }
+
+    // ========================================================================
+    // Parameter Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_minimizer_params_kmer_larger_than_window() {
+        let result = MinimizerParams::new(7, 5, 1);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("kmer_len"));
+        assert!(err_msg.contains("window_len"));
+    }
+
+    #[test]
+    fn test_minimizer_params_kmer_exceeds_32() {
+        // kmer_len > 32 is invalid (doesn't fit in 64-bit 2-bit encoding)
+        let result = MinimizerParams::new(33, 50, 3);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+        assert!(err_msg.contains("k-mer length must be <= 32"));
+    }
+
+    #[test]
+    fn test_minimizer_params_valid() {
+        let params = MinimizerParams::new(5, 10, 1).unwrap();
+        assert_eq!(params.window_len, 10);
+        assert_eq!(params.kmer_len, 5);
+
+        // it's legal if surprising to have window and kmer length match
+        // Note: Rust has max kmer_len of 32, so we use 32 instead of 47
+        let params2 = MinimizerParams::new(32, 32, 1).unwrap();
+        assert_eq!(params2.window_len, 32);
+        assert_eq!(params2.kmer_len, 32);
+    }
+
+    // ========================================================================
+    // Bucketing Test (1 test)
+    // ========================================================================
+
+    #[test]
+    fn test_dups_share_buckets() {
+        // Test with realistic-ish data that two read pairs which are duplicates
+        // with a single base error in each of fwd/rev read share a bucket.
+        // This test is probabilistic, though with fixed random seed should be consistent.
+        let mut rng = StdRng::seed_from_u64(1234);
+        let read_len = 150;
+
+        // Helper to introduce errors: random 1bp offset and/or single base substitution
+        fn seq_with_error(seq: &str, rng: &mut StdRng) -> String {
+            if seq.is_empty() {
+                return seq.to_string();
+            }
+
+            let bases = ['A', 'C', 'G', 'T'];
+
+            // Randomly apply 1bp offset (remove first base)
+            let mut result = if rng.gen_bool(0.5) && seq.len() > 1 {
+                seq[1..].to_string()
+            } else {
+                seq.to_string()
+            };
+
+            // Introduce a single base substitution at a random position
+            if !result.is_empty() {
+                let error_pos = rng.gen_range(0..result.len());
+                let new_base = bases[rng.gen_range(0..4)];
+                result.replace_range(error_pos..=error_pos, &new_base.to_string());
+            }
+
+            result
+        }
+
+        for _ in 0..100 {
+            // create a pair of reads that are dups but not perfect dups
+            let fwd1 = random_seq(read_len, &mut rng);
+            let rev1 = random_seq(read_len, &mut rng);
+
+            let fwd2 = seq_with_error(&fwd1, &mut rng);
+            let rev2 = seq_with_error(&rev1, &mut rng);
+
+            let m_params = MinimizerParams::default();
+
+            // Extract minimizers from both reads
+            let mins1_fwd = extract_minimizers(&fwd1, &m_params);
+            let mins1_rev = extract_minimizers(&rev1, &m_params);
+            let mins2_fwd = extract_minimizers(&fwd2, &m_params);
+            let mins2_rev = extract_minimizers(&rev2, &m_params);
+
+            // Check if they share at least one minimizer
+            let mut all_mins1 = mins1_fwd;
+            all_mins1.extend(mins1_rev);
+            let mut all_mins2 = mins2_fwd;
+            all_mins2.extend(mins2_rev);
+
+            let set1: AHashSet<u64> = all_mins1.iter().copied().collect();
+            let set2: AHashSet<u64> = all_mins2.iter().copied().collect();
+
+            let shared = set1.intersection(&set2).count();
+            assert!(shared > 0, "Duplicates with errors should share at least one bucket");
+        }
+    }
+
+    // ========================================================================
+    // Base Encoding Tests
+    // ========================================================================
+
+    #[test]
+    fn test_encode_base_valid_uppercase() {
+        assert_eq!(encode_base(b'A'), Some(0));
+        assert_eq!(encode_base(b'C'), Some(1));
+        assert_eq!(encode_base(b'G'), Some(2));
+        assert_eq!(encode_base(b'T'), Some(3));
+    }
+
+    #[test]
+    fn test_encode_base_valid_lowercase() {
+        assert_eq!(encode_base(b'a'), Some(0));
+        assert_eq!(encode_base(b'c'), Some(1));
+        assert_eq!(encode_base(b'g'), Some(2));
+        assert_eq!(encode_base(b't'), Some(3));
+    }
+
+    #[test]
+    fn test_encode_base_invalid_n() {
+        assert_eq!(encode_base(b'N'), None);
+        assert_eq!(encode_base(b'n'), None);
+    }
+
+    #[test]
+    fn test_encode_base_invalid_characters() {
+        assert_eq!(encode_base(b'X'), None);
+        assert_eq!(encode_base(b'Y'), None);
+        assert_eq!(encode_base(b'-'), None);
+        assert_eq!(encode_base(b' '), None);
+        assert_eq!(encode_base(b'0'), None);
+    }
+
 }
