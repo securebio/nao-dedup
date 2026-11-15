@@ -92,6 +92,10 @@ literature, or be supplied at runtime.
   against cluster leaders, best-quality exemplar resolved in `finalize()`.
 - `src/dedup_interleaved_fastq.rs`: two-pass CLI for gzip interleaved
   FASTQ.
+- `src/ont/`: ONT library (`seeds`, `compare`, `context`), and
+  `src/dedup_ont_fastq.rs`: the ONT CLI. Tests are in `tests/ont_tests.rs`
+  and `tests/ont_cli_tests.rs`; `examples/ont_eval.rs` runs simulation
+  sweeps.
 - `tests/`: integration tests (`dedup_tests.rs`) and CLI tests
   (`cli_tests.rs`).
 - `ont-sim/`: dev-only ONT read simulator and dedup evaluator (see

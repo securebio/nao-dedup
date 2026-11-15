@@ -204,3 +204,122 @@ fn rejects_outputs_that_overwrite_the_input() {
         "@r0\nACGT\n+\nIIII\n"
     );
 }
+
+#[test]
+fn plain_output_can_go_to_stdout() {
+    let mut rng = StdRng::seed_from_u64(4);
+    let seq = random_seq(600, &mut rng);
+    let dir = TempDir::new().unwrap();
+    let in_path = dir.path().join("in.fastq");
+    fs::write(&in_path, fastq(&[("r0", &seq, '5'), ("r1", &seq, '5')])).unwrap();
+    let output = Command::cargo_bin("dedup_ont_fastq")
+        .unwrap()
+        .arg(&in_path)
+        .arg("/dev/stdout")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().lines().count(), 4);
+}
+
+#[test]
+fn rejects_output_hard_linked_to_input() {
+    let dir = TempDir::new().unwrap();
+    let in_path = dir.path().join("in.fastq");
+    fs::write(&in_path, "@r0\nACGT\n+\nIIII\n").unwrap();
+    let link = dir.path().join("link.fastq");
+    fs::hard_link(&in_path, &link).unwrap();
+    Command::cargo_bin("dedup_ont_fastq")
+        .unwrap()
+        .arg(&in_path)
+        .arg(&link)
+        .assert()
+        .failure();
+    assert_eq!(
+        fs::read_to_string(&in_path).unwrap(),
+        "@r0\nACGT\n+\nIIII\n"
+    );
+}
+
+#[test]
+fn detects_gzip_by_content_and_applies_tuning_flags() {
+    // Two reads whose starts differ by 20 bases: separate by default,
+    // merged once the endpoint tolerance covers the shift. The input is
+    // gzip-compressed despite its plain .fastq name.
+    let mut rng = StdRng::seed_from_u64(5);
+    let genome = random_seq(2200, &mut rng);
+    let input = fastq(&[
+        ("r0", &genome[100..2100], '5'),
+        ("r1", &genome[120..2100], '5'),
+    ]);
+    let dir = TempDir::new().unwrap();
+    let in_path = dir.path().join("in.fastq");
+    let mut gz = GzEncoder::new(File::create(&in_path).unwrap(), Compression::default());
+    gz.write_all(input.as_bytes()).unwrap();
+    gz.finish().unwrap();
+    let count = |extra: &[&str]| {
+        let out = dir.path().join("out.fastq");
+        Command::cargo_bin("dedup_ont_fastq")
+            .unwrap()
+            .arg(&in_path)
+            .arg(&out)
+            .args(extra)
+            .assert()
+            .success();
+        read_maybe_gz(&out).lines().count() / 4
+    };
+    assert_eq!(count(&[]), 2);
+    assert_eq!(count(&["--max-end-offset", "25"]), 1);
+}
+
+#[test]
+fn rejects_invalid_seed_parameters_and_names_bad_records() {
+    run_on("", &["--kmer-len", "40"]).0.failure();
+    let (assert, _dir) = run_on("@r0\nACGT\n+\nIIII\n@r1\nACGT\n+\nII\n", &[]);
+    let stderr = String::from_utf8(assert.failure().get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("FASTQ record 2"), "{stderr}");
+    assert!(stderr.contains("in.fastq"), "{stderr}");
+}
+
+#[test]
+fn rejects_aliased_new_outputs_and_shared_streams() {
+    let dir = TempDir::new().unwrap();
+    let in_path = dir.path().join("in.fastq");
+    fs::write(&in_path, "@r0\nACGT\n+\nIIII\n").unwrap();
+    fs::create_dir(dir.path().join("sub")).unwrap();
+    let cases = [
+        // Same new file reached through `sub/..`.
+        (
+            dir.path().join("out.fastq"),
+            dir.path().join("sub/../out.fastq"),
+        ),
+        // Both outputs on one stream.
+        ("/dev/stdout".into(), "/proc/self/fd/1".into()),
+    ];
+    for (out, assignments) in cases {
+        Command::cargo_bin("dedup_ont_fastq")
+            .unwrap()
+            .arg(&in_path)
+            .arg(&out)
+            .arg("--assignments")
+            .arg(&assignments)
+            .assert()
+            .failure();
+    }
+}
+
+#[test]
+fn unreadable_input_error_names_the_path() {
+    let dir = TempDir::new().unwrap();
+    let assert = Command::cargo_bin("dedup_ont_fastq")
+        .unwrap()
+        .arg(dir.path())
+        .arg(dir.path().join("out.fastq"))
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(
+        stderr.contains(&dir.path().display().to_string()),
+        "{stderr}"
+    );
+}

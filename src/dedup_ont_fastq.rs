@@ -85,15 +85,31 @@ struct FastqRecord {
 /// Reads FASTQ records, reusing one record's buffers.
 struct FastqReader<R: BufRead> {
     reader: R,
+    records_read: usize,
 }
 
 impl<R: BufRead> FastqReader<R> {
     fn new(reader: R) -> Self {
-        Self { reader }
+        Self {
+            reader,
+            records_read: 0,
+        }
     }
 
     /// Read the next record into `record`; returns false at end of input.
+    /// Errors name the (1-based) record that failed.
     fn next_into(&mut self, record: &mut FastqRecord) -> io::Result<bool> {
+        let result = self.read_record(record).map_err(|e| {
+            let n = self.records_read + 1;
+            io::Error::new(e.kind(), format!("FASTQ record {n}: {e}"))
+        });
+        if let Ok(true) = result {
+            self.records_read += 1;
+        }
+        result
+    }
+
+    fn read_record(&mut self, record: &mut FastqRecord) -> io::Result<bool> {
         if !read_line(&mut self.reader, &mut record.header)? {
             return Ok(false);
         }
@@ -137,8 +153,11 @@ fn read_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<bool> 
 
 /// Open a FASTQ file, decompressing it if it starts with the gzip magic bytes.
 fn open_fastq(path: &Path) -> io::Result<FastqReader<Box<dyn BufRead>>> {
-    let mut file = BufReader::new(File::open(path)?);
-    let gzipped = file.fill_buf()?.starts_with(&[0x1f, 0x8b]);
+    let mut file = BufReader::new(File::open(path).map_err(|e| with_path(e, path))?);
+    let gzipped = file
+        .fill_buf()
+        .map_err(|e| with_path(e, path))?
+        .starts_with(&[0x1f, 0x8b]);
     let reader: Box<dyn BufRead> = if gzipped {
         Box::new(BufReader::new(MultiGzDecoder::new(file)))
     } else {
@@ -183,38 +202,69 @@ impl Output {
     }
 }
 
-/// Refuse to run if an output path would overwrite the input or another
-/// output, which would corrupt the second pass or lose results.
+/// Refuse to run if an output would overwrite the input or another output,
+/// which would corrupt the second pass or lose results. Existing files of
+/// any kind (including /dev/stdout or a pipe) are compared by device and
+/// inode, which catches symlinks, hard links, and two outputs sharing one
+/// stream. Outputs that don't exist yet are compared by path, with their
+/// parent directory resolved.
 fn check_distinct_paths(cli: &Cli) -> io::Result<()> {
-    // Resolve symlinks and relative paths; outputs may not exist yet, so
-    // resolve their parent directory instead.
-    let resolve = |path: &Path| -> io::Result<PathBuf> {
-        if path.exists() {
-            return path.canonicalize();
-        }
-        let parent = match path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p.canonicalize()?,
-            _ => std::env::current_dir()?,
-        };
-        Ok(parent.join(path.file_name().unwrap_or_default()))
-    };
-    let mut paths = vec![resolve(&cli.input)?, resolve(&cli.output)?];
-    if let Some(assignments) = &cli.assignments {
-        paths.push(resolve(assignments)?);
+    use std::os::unix::fs::MetadataExt;
+
+    #[derive(PartialEq)]
+    enum Identity {
+        Existing(u64, u64),
+        New(PathBuf),
     }
-    for (i, a) in paths.iter().enumerate() {
-        if paths[i + 1..].contains(a) {
+    let identify = |path: &Path| -> io::Result<Identity> {
+        match std::fs::metadata(path) {
+            Ok(m) => Ok(Identity::Existing(m.dev(), m.ino())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let parent = match path.parent() {
+                    Some(p) if !p.as_os_str().is_empty() => p,
+                    _ => Path::new("."),
+                };
+                let parent = parent.canonicalize().map_err(|e| with_path(e, parent))?;
+                Ok(Identity::New(
+                    parent.join(path.file_name().unwrap_or_default()),
+                ))
+            }
+            Err(e) => Err(with_path(e, path)),
+        }
+    };
+    let mut paths = vec![&cli.input, &cli.output];
+    paths.extend(&cli.assignments);
+    let ids = paths
+        .iter()
+        .map(|p| identify(p))
+        .collect::<io::Result<Vec<_>>>()?;
+    for (i, id) in ids.iter().enumerate() {
+        if ids[i + 1..].contains(id) {
             return Err(invalid(&format!(
                 "input, output, and assignments must be different files ({})",
-                a.display()
+                paths[i].display()
             )));
         }
     }
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+/// Add the file path to an I/O error's message.
+fn with_path(e: io::Error, path: &Path) -> io::Error {
+    io::Error::new(e.kind(), format!("{}: {e}", path.display()))
+}
+
+fn main() -> std::process::ExitCode {
+    match run(Cli::parse()) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let dedup_params = OntDedupParams {
         max_end_offset: cli.max_end_offset,
         end_check_len: cli.end_check_len,
@@ -230,7 +280,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ctx = OntDedupContext::new(dedup_params, minimizer_params);
     let mut reader = open_fastq(&cli.input)?;
     let mut n_reads = 0;
-    while reader.next_into(&mut record)? {
+    while reader
+        .next_into(&mut record)
+        .map_err(|e| with_path(e, &cli.input))?
+    {
         ctx.process_read_by_index(n_reads, &record.sequence, &record.quality);
         n_reads += 1;
         if n_reads % 100_000 == 0 {
@@ -254,21 +307,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(path) = &cli.assignments {
-        let mut out = BufWriter::new(File::create(path)?);
-        writeln!(out, "read_idx\texemplar_idx")?;
-        for idx in 0..total {
-            writeln!(out, "{idx}\t{}", ctx.get_exemplar_index(idx))?;
-        }
-        out.flush()?;
+        let write = || -> io::Result<()> {
+            let mut out = BufWriter::new(File::create(path)?);
+            writeln!(out, "read_idx\texemplar_idx")?;
+            for idx in 0..total {
+                writeln!(out, "{idx}\t{}", ctx.get_exemplar_index(idx))?;
+            }
+            out.flush()
+        };
+        write().map_err(|e| with_path(e, path))?;
     }
 
     eprintln!("Pass 2: Writing exemplars to output...");
     let exemplars = ctx.get_exemplar_indices();
     let mut reader = open_fastq(&cli.input)?;
-    let mut output = Output::create(&cli.output)?;
+    let mut output = Output::create(&cli.output).map_err(|e| with_path(e, &cli.output))?;
     let writer = output.writer();
     let (mut idx, mut written) = (0, 0);
-    while reader.next_into(&mut record)? {
+    while reader
+        .next_into(&mut record)
+        .map_err(|e| with_path(e, &cli.input))?
+    {
         if exemplars.contains(&idx) {
             for line in [
                 &record.header,
@@ -276,8 +335,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &record.plus,
                 &record.quality,
             ] {
-                writer.write_all(line)?;
-                writer.write_all(b"\n")?;
+                writer
+                    .write_all(line)
+                    .and_then(|()| writer.write_all(b"\n"))
+                    .map_err(|e| with_path(e, &cli.output))?;
             }
             written += 1;
         }
@@ -286,7 +347,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if idx != n_reads {
         return Err(format!("input changed between passes ({n_reads} then {idx} reads)").into());
     }
-    output.finish()?;
+    output.finish().map_err(|e| with_path(e, &cli.output))?;
     eprintln!("  Wrote {written} exemplar reads");
     eprintln!("Done!");
     Ok(())

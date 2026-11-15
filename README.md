@@ -113,7 +113,8 @@ cargo build --release --bin dedup_ont_fastq
 - **Output**: one exemplar record per duplicate group, unchanged except that
   line endings are normalized to `\n`. The output
   is gzip-compressed if the path ends in `.gz`; otherwise it is plain, which
-  is faster and can be piped to a parallel compressor.
+  is faster and can be piped to a parallel compressor, e.g.
+  `dedup_ont_fastq in.fastq.gz /dev/stdout | pigz > out.fastq.gz`.
 - **`--assignments`** writes `read_idx`/`exemplar_idx` for every read (0-based
   input positions).
 - **`--no-rc`** only matches reads in the same orientation, for directional
