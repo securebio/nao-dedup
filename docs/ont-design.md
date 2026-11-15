@@ -67,19 +67,23 @@ cluster greedily, and resolve the best exemplar at finalize.
      same seeds.
    - Minimizers are chosen by a mixing hash, not the lexicographic 2-bit
      value, so poly-A k-mers aren't systematically preferred.
-2. **Buckets.** The primary keys are pairs of seeds, one from each end.
-   Every start-window seed is combined with every end-window seed. A pair is
-   stored unordered, because reverse complementing a read swaps its ends.
-   This differs from Illumina, where each single minimizer is a bucket.
-   Candidates need evidence at both ends, which keeps buckets small at
-   endpoint hotspots.
-   Each posting also records how far its two seeds are from their read
-   ends. A leader whose seed offsets differ from the read's by more than the
-   endpoint allowance (plus indel drift proportional to the distance from
-   the end) can't pass the endpoint check, so it is skipped without
-   aligning. For non-repetitive sequence this is exact within the end-check
-   window; further in, and in repeats, it is a heuristic. Whether a rescue path using single-end seeds is
-   needed will be decided by measured recall.
+2. **Buckets.** As in the Illumina path, each seed is a bucket key: a
+   leader is posted under each of its 16 end seeds, with the end it came
+   from and its distance from that end. Unlike Illumina, a candidate needs
+   evidence at *both* ends. A read's start seeds must hit one end of the
+   leader and its end seeds the other, in a consistent orientation (start
+   to start and end to end, or swapped for the reverse complement). Only
+   then is it aligned, and only in that orientation.
+   - **Offset filter.** Postings whose offsets differ from the read's by
+     more than the endpoint allowance (plus indel drift proportional to the
+     distance from the end) are ignored, since such a leader can't pass the
+     endpoint check. For non-repetitive sequence this is exact within the
+     end-check window; further in, and in repeats, it is a heuristic.
+     Buckets are sorted by offset, so a lookup visits only the compatible
+     range.
+   - **Search order.** Seeds are consulted from the read ends inward, and
+     the search stops at the first matching leader. This matters in dense
+     groups, where inner seeds can have very large compatible ranges.
 3. **Comparison.** Candidates go through a staged check:
    - **Orientation.** Same strand, or reverse complement when allowed.
    - **Endpoint check.** At each end, the first bases inward from the
@@ -102,14 +106,17 @@ cluster greedily, and resolve the best exemplar at finalize.
 
 ## Data structures
 
-- **Leader sequences.** Packed at 2 bits per base in a chunked arena, with a
-  fallback for non-ACGT bases, and indexed by leader id rather than read
-  index. Memory scales with the bases of unique reads. The 64 GB target
-  assumes inputs of at most ~100 Gbp; at that size, even fully unique input
-  packs to ~25 GB, leaving room for the index.
+- **Leader sequences.** Packed at 2 bits per base, with a verbatim fallback
+  for the rare leader containing non-ACGT bases, and indexed by leader id
+  rather than read index. A candidate's end windows are unpacked first, and
+  the whole leader only if its ends match.
 - **Assignments.** One `u32` assignment per read.
-- **Seed index.** A compact map from pair key to leader ids, deduplicated per
-  leader.
+- **Seed index.** A hash map from seed to an offset-sorted list of 8-byte
+  postings (leader id, offset, end), 16 postings per leader.
+- **Measured footprint.** About 1.2 KB per leader at ~2.5 kb reads, so the
+  64 GB target holds even if nearly all of 50M reads are unique.
+  `examples/ont_scale.rs` streams synthetic reads to measure throughput and
+  peak memory at that scale.
 
 ## Validation
 
