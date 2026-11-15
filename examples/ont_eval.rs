@@ -65,9 +65,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = ctx.detailed_stats();
     if args.json {
         println!(
-            "{{\"metrics\":{},\"seconds\":{seconds},\"unseeded_reads\":{},\"candidates_compared\":{}}}",
+            "{{\"metrics\":{},\"seconds\":{seconds},\"unseeded_reads\":{},\"postings_visited\":{},\"candidates_compared\":{}}}",
             result.to_json(),
             stats.unseeded_reads,
+            stats.postings_visited,
             stats.candidates_compared
         );
     } else {

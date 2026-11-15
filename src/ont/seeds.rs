@@ -83,47 +83,12 @@ pub(crate) struct Seed {
 pub(crate) type Minimizers = SmallVec<[Seed; 8]>;
 
 /// Minimizers from the windows at each end of a read, ordered from the read
-/// boundary inward.
+/// boundary inward. Each seed is a bucket key; a read and its reverse
+/// complement have the same seeds with the ends swapped.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct EndSeeds {
     pub start: Minimizers,
     pub end: Minimizers,
-}
-
-/// A bucket key built from one start seed and one end seed, with the two
-/// seeds' offsets. Offsets are ordered by seed hash (then value), matching
-/// the unordered key, so they correspond between a read and its reverse
-/// complement.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct PairKey {
-    pub key: u64,
-    pub offsets: (u16, u16),
-}
-
-impl EndSeeds {
-    /// Bucket keys for every (start, end) seed pair. A key can repeat with
-    /// different offsets (the same minimizer in several windows); each
-    /// distinct placement is kept, since only one may line up with a
-    /// duplicate's.
-    pub(crate) fn pair_keys(&self) -> SmallVec<[PairKey; 64]> {
-        let mut keys: SmallVec<[PairKey; 64]> = SmallVec::new();
-        for &a in &self.start {
-            for &b in &self.end {
-                let (lo, hi) = if (a.hash, a.offset) <= (b.hash, b.offset) {
-                    (a, b)
-                } else {
-                    (b, a)
-                };
-                keys.push(PairKey {
-                    key: mix(lo.hash ^ mix(hi.hash)),
-                    offsets: (lo.offset, hi.offset),
-                });
-            }
-        }
-        keys.sort_unstable_by_key(|k| (k.key, k.offsets));
-        keys.dedup();
-        keys
-    }
 }
 
 const INVALID: u64 = u64::MAX;
@@ -312,7 +277,6 @@ mod tests {
             let rc = seeds(&reverse_complement(&seq), &params);
             assert_eq!(fwd.start, rc.end, "len {len}");
             assert_eq!(fwd.end, rc.start, "len {len}");
-            assert_eq!(fwd.pair_keys(), rc.pair_keys(), "len {len}");
         }
     }
 
@@ -349,7 +313,7 @@ mod tests {
         assert_eq!((s.start.len(), s.end.len()), (2, 2));
         // Shorter than k: no seeds.
         let s = seeds(&random_seq(16, &mut rng), &params);
-        assert!(s.start.is_empty() && s.end.is_empty() && s.pair_keys().is_empty());
+        assert!(s.start.is_empty() && s.end.is_empty());
     }
 
     #[test]
@@ -366,9 +330,11 @@ mod tests {
     }
 
     #[test]
-    fn duplicates_with_errors_share_a_pair_key() {
+    fn duplicates_with_errors_share_seeds_at_both_ends() {
         // Substitutions and indels near both ends, in either orientation:
-        // some pair key survives, with offsets within the indel size.
+        // each end still shares a seed with the original, at an offset
+        // within the indel size. For the reverse complement, the read's
+        // start corresponds to the original's end.
         let mut rng = StdRng::seed_from_u64(4);
         let params = OntMinimizerParams::default();
         let seq = random_seq(1500, &mut rng);
@@ -376,18 +342,17 @@ mod tests {
         read[10] = if seq[10] == b'A' { b'C' } else { b'A' };
         read.insert(70, b'G'); // shifts later start seeds by one
         read.remove(1400); // shifts end seeds inward of it by one
-        let original = seeds(&seq, &params).pair_keys();
-        for other in [read.clone(), reverse_complement(&read)] {
-            let keys = seeds(&other, &params).pair_keys();
-            let shared: Vec<_> = original
-                .iter()
-                .filter_map(|x| keys.iter().find(|y| y.key == x.key).map(|y| (x, y)))
-                .collect();
-            assert!(!shared.is_empty());
-            assert!(shared.iter().any(|(x, y)| {
-                x.offsets.0.abs_diff(y.offsets.0) <= 1 && x.offsets.1.abs_diff(y.offsets.1) <= 1
-            }));
-        }
+        let original = seeds(&seq, &params);
+        let shares = |a: &Minimizers, b: &Minimizers| {
+            a.iter().any(|x| {
+                b.iter()
+                    .any(|y| x.hash == y.hash && x.offset.abs_diff(y.offset) <= 1)
+            })
+        };
+        let fwd = seeds(&read, &params);
+        assert!(shares(&original.start, &fwd.start) && shares(&original.end, &fwd.end));
+        let rc = seeds(&reverse_complement(&read), &params);
+        assert!(shares(&original.start, &rc.end) && shares(&original.end, &rc.start));
     }
 
     /// Independent per-k-mer reference for `kmer_hashes`.

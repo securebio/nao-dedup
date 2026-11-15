@@ -296,6 +296,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  Total reads: {total}");
     eprintln!("  Unique clusters: {clusters}");
     eprintln!("  Reads without seeds: {}", stats.unseeded_reads);
+    eprintln!("  Postings visited: {}", stats.postings_visited);
     eprintln!("  Candidate comparisons: {}", stats.candidates_compared);
     if total > 0 {
         eprintln!(

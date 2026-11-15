@@ -9,17 +9,31 @@
 
 use super::compare::{OntDedupParams, is_duplicate};
 use super::reverse_complement_into;
-use super::seeds::{OntMinimizerParams, PairKey, end_seeds};
+use super::seeds::{EndSeeds, OntMinimizerParams, end_seeds};
 use ahash::AHashSet;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
-/// A leader's entry in a bucket, with the offsets of the bucket key's seeds
-/// in the leader (see `PairKey`).
+/// A leader's entry in a seed's bucket: which end of the leader the seed
+/// came from, and its offset from that end (see `Seed`).
 #[derive(Debug, Clone, Copy)]
 struct Posting {
     cluster: u32,
-    offsets: (u16, u16),
+    offset: u16,
+    at_end: bool,
 }
+
+// Evidence bits for a candidate leader: which end of the read matched a seed
+// from which end of the leader. Same orientation needs START_START and
+// END_END; reverse complement needs START_END and END_START.
+const START_START: u8 = 1;
+const END_END: u8 = 2;
+const START_END: u8 = 4;
+const END_START: u8 = 8;
+const SAME_STRAND: u8 = START_START | END_END;
+const OPPOSITE_STRAND: u8 = START_END | END_START;
+// Set once a leader has been aligned in that orientation.
+const TRIED_SAME: u8 = 16;
+const TRIED_OPPOSITE: u8 = 32;
 
 #[derive(Debug, Clone)]
 struct Cluster {
@@ -42,6 +56,25 @@ struct Cluster {
 fn offsets_compatible(a: u16, b: u16, params: &OntDedupParams) -> bool {
     let drift = (params.max_error_frac * f64::from(a.max(b))).ceil() as usize;
     usize::from(a.abs_diff(b)) <= params.max_end_offset + params.max_end_errors + drift
+}
+
+/// Bounds `(lo, hi)` containing every offset compatible with `a` under
+/// `offsets_compatible` (which is still checked exactly, since the drift
+/// allowance depends on the larger offset).
+fn compatible_offset_range(a: u16, params: &OntDedupParams) -> (u16, u16) {
+    let base = (params.max_end_offset + params.max_end_errors) as f64;
+    let a = f64::from(a);
+    let frac = params.max_error_frac;
+    // b <= a: a - b <= base + ceil(frac * a).
+    let lo = a - base - (frac * a).ceil();
+    // b >= a: b - a <= base + ceil(frac * b) < base + frac * b + 1, which
+    // bounds b only when frac < 1.
+    let hi = if frac < 1.0 {
+        ((a + base + 1.0) / (1.0 - frac)).ceil()
+    } else {
+        f64::from(u16::MAX)
+    };
+    (lo.max(0.0) as u16, hi.min(f64::from(u16::MAX)) as u16)
 }
 
 /// Exemplar ranking: mean Phred quality first, then length, compared
@@ -71,7 +104,10 @@ pub struct OntDedupStats {
     /// Reads that yielded no seed-pair keys (too short or no valid k-mers);
     /// each becomes a singleton cluster.
     pub unseeded_reads: usize,
-    /// Distinct leaders compared against, summed over reads.
+    /// Bucket entries examined, summed over reads.
+    pub postings_visited: usize,
+    /// Leaders with seed evidence at both ends that were aligned against,
+    /// summed over reads.
     pub candidates_compared: usize,
 }
 
@@ -82,7 +118,9 @@ pub struct OntDedupContext {
     dedup_params: OntDedupParams,
     minimizer_params: OntMinimizerParams,
 
-    /// Seed-pair key -> leaders with that key.
+    /// Seed hash -> leaders with that seed at either end, sorted by offset
+    /// (then insertion order) so a lookup can visit just the compatible
+    /// offset range. Dense groups make some buckets very large.
     buckets: FxHashMap<u64, Vec<Posting>>,
     /// Leader sequences, concatenated; leader `c` is
     /// `leader_bases[leader_starts[c]..leader_starts[c + 1]]`.
@@ -102,7 +140,9 @@ pub struct OntDedupContext {
     hash_scratch: Vec<u64>,
     read_scratch: Vec<u8>,
     rc_scratch: Vec<u8>,
-    checked: FxHashSet<u32>,
+    /// Candidate leader -> evidence bits, and leaders ready to align.
+    evidence: FxHashMap<u32, u8>,
+    candidates: Vec<u32>,
 }
 
 impl OntDedupContext {
@@ -125,7 +165,8 @@ impl OntDedupContext {
             hash_scratch: Vec::new(),
             read_scratch: Vec::new(),
             rc_scratch: Vec::new(),
-            checked: FxHashSet::default(),
+            evidence: FxHashMap::default(),
+            candidates: Vec::new(),
         }
     }
 
@@ -149,11 +190,11 @@ impl OntDedupContext {
         read.clear();
         read.extend(seq.iter().map(u8::to_ascii_uppercase));
 
-        let keys = end_seeds(&read, &self.minimizer_params, &mut self.hash_scratch).pair_keys();
-        if keys.is_empty() {
+        let seeds = end_seeds(&read, &self.minimizer_params, &mut self.hash_scratch);
+        if seeds.start.is_empty() || seeds.end.is_empty() {
             self.stats.unseeded_reads += 1;
         }
-        let matched = self.find_matching_cluster(&read, &keys);
+        let matched = self.find_matching_cluster(&read, &seeds);
 
         let cluster_id = match matched {
             Some(cluster_id) => {
@@ -172,11 +213,20 @@ impl OntDedupContext {
                 });
                 self.leader_bases.extend_from_slice(&read);
                 self.leader_starts.push(self.leader_bases.len());
-                for key in &keys {
-                    self.buckets.entry(key.key).or_default().push(Posting {
-                        cluster: cluster_id,
-                        offsets: key.offsets,
-                    });
+                // A leader needs seeds at both ends to ever be found.
+                if !seeds.start.is_empty() && !seeds.end.is_empty() {
+                    for (at_end, end) in [(false, &seeds.start), (true, &seeds.end)] {
+                        for seed in end {
+                            let bucket = self.buckets.entry(seed.hash).or_default();
+                            let pos = bucket.partition_point(|p| p.offset <= seed.offset);
+                            let posting = Posting {
+                                cluster: cluster_id,
+                                offset: seed.offset,
+                                at_end,
+                            };
+                            bucket.insert(pos, posting);
+                        }
+                    }
                 }
                 cluster_id
             }
@@ -190,46 +240,92 @@ impl OntDedupContext {
         cluster_id
     }
 
-    /// First leader, in bucket order, that `read` duplicates in an allowed
-    /// orientation.
-    fn find_matching_cluster(&mut self, read: &[u8], keys: &[PairKey]) -> Option<u32> {
-        let mut checked = std::mem::take(&mut self.checked);
-        checked.clear();
+    /// First leader that `read` duplicates in an allowed orientation.
+    ///
+    /// Seeds are consulted from the read ends inward, one window per end at
+    /// a time. Each leader posting with a compatible offset adds evidence
+    /// for the (read end, leader end) pair it links. As soon as a leader has
+    /// evidence at both ends in a consistent orientation it is aligned, in
+    /// that orientation only, and the search stops at the first match. Seeds
+    /// near the ends are the most precise, and in dense groups most reads
+    /// match early, which avoids scanning the large buckets of inner seeds.
+    fn find_matching_cluster(&mut self, read: &[u8], seeds: &EndSeeds) -> Option<u32> {
         let params = &self.dedup_params;
+        let evidence = &mut self.evidence;
+        let ready = &mut self.candidates;
+        evidence.clear();
         let mut rc_ready = false;
-        let mut matched = None;
-        'search: for key in keys {
-            let Some(bucket) = self.buckets.get(&key.key) else {
-                continue;
-            };
-            for posting in bucket {
-                if !offsets_compatible(posting.offsets.0, key.offsets.0, params)
-                    || !offsets_compatible(posting.offsets.1, key.offsets.1, params)
-                    || !checked.insert(posting.cluster)
-                {
+        for window in 0..seeds.start.len().max(seeds.end.len()) {
+            ready.clear();
+            for (read_at_end, end) in [(false, &seeds.start), (true, &seeds.end)] {
+                let Some(seed) = end.get(window) else {
+                    continue;
+                };
+                let Some(bucket) = self.buckets.get(&seed.hash) else {
+                    continue;
+                };
+                let (lo, hi) = compatible_offset_range(seed.offset, params);
+                let first = bucket.partition_point(|p| p.offset < lo);
+                let last = bucket.partition_point(|p| p.offset <= hi);
+                let in_range = &bucket[first..last];
+                self.stats.postings_visited += in_range.len();
+                for posting in in_range {
+                    if !offsets_compatible(posting.offset, seed.offset, params) {
+                        continue;
+                    }
+                    let bit = match (read_at_end, posting.at_end) {
+                        (false, false) => START_START,
+                        (true, true) => END_END,
+                        (false, true) => START_END,
+                        (true, false) => END_START,
+                    };
+                    let bits = evidence.entry(posting.cluster).or_insert(0);
+                    let before = *bits;
+                    *bits |= bit;
+                    let completed = |b: u8, mask: u8| b & mask != mask && *bits & mask == mask;
+                    if completed(before, SAME_STRAND)
+                        || (params.rc_tolerant && completed(before, OPPOSITE_STRAND))
+                    {
+                        ready.push(posting.cluster);
+                    }
+                }
+            }
+
+            for &cluster in ready.iter() {
+                // A leader completing both orientations in one window is
+                // listed twice; the second visit finds nothing new to try.
+                let bits = evidence.get_mut(&cluster).unwrap();
+                let same = *bits & (SAME_STRAND | TRIED_SAME) == SAME_STRAND;
+                let opposite = params.rc_tolerant
+                    && *bits & (OPPOSITE_STRAND | TRIED_OPPOSITE) == OPPOSITE_STRAND;
+                if same {
+                    *bits |= TRIED_SAME;
+                }
+                if opposite {
+                    *bits |= TRIED_OPPOSITE;
+                }
+                if !same && !opposite {
                     continue;
                 }
                 self.stats.candidates_compared += 1;
-                let c = posting.cluster as usize;
+                let c = cluster as usize;
                 let leader = &self.leader_bases[self.leader_starts[c]..self.leader_starts[c + 1]];
-                let mut rc_matches = || {
-                    params.rc_tolerant && {
-                        // Computed once per read, and only if needed.
-                        if !rc_ready {
-                            reverse_complement_into(read, &mut self.rc_scratch);
-                            rc_ready = true;
-                        }
-                        is_duplicate(&self.rc_scratch, leader, params)
+                if same && is_duplicate(read, leader, params) {
+                    return Some(cluster);
+                }
+                if opposite {
+                    // Computed once per read, and only if needed.
+                    if !rc_ready {
+                        reverse_complement_into(read, &mut self.rc_scratch);
+                        rc_ready = true;
                     }
-                };
-                if is_duplicate(read, leader, params) || rc_matches() {
-                    matched = Some(posting.cluster);
-                    break 'search;
+                    if is_duplicate(&self.rc_scratch, leader, params) {
+                        return Some(cluster);
+                    }
                 }
             }
         }
-        self.checked = checked;
-        matched
+        None
     }
 
     /// Resolve every read to its cluster's best read. Must be called before
@@ -303,5 +399,25 @@ mod tests {
         assert!(!offsets_compatible(250, 232, &params));
         // Symmetric.
         assert!(offsets_compatible(233, 250, &params));
+    }
+
+    #[test]
+    fn offset_range_contains_every_compatible_offset() {
+        for (frac, base_errors) in [(0.0, 0), (0.04, 5), (0.2, 10), (1.0, 3)] {
+            let params = OntDedupParams {
+                max_end_offset: 2,
+                max_end_errors: base_errors,
+                max_error_frac: frac,
+                ..Default::default()
+            };
+            for a in (0..2000).step_by(7) {
+                let (lo, hi) = compatible_offset_range(a, &params);
+                for b in 0..2600 {
+                    if offsets_compatible(a, b, &params) {
+                        assert!((lo..=hi).contains(&b), "a={a} b={b} frac={frac}");
+                    }
+                }
+            }
+        }
     }
 }
