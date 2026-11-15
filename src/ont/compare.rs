@@ -28,8 +28,9 @@ use std::ops::Range;
 /// The defaults suit reads of roughly 1% per-read error (typical of current
 /// ONT chemistry and high-accuracy basecalling): two such reads differ by
 /// about 2%, comfortably inside `max_error_frac`. They were chosen by sweeps
-/// on simulated reads and checked against real data. Noisier reads need a larger `max_error_frac` and
-/// `max_end_errors`; otherwise true duplicates are silently kept as unique.
+/// on simulated reads and checked against real data. Noisier reads need a
+/// larger `max_error_frac` and `max_end_errors`; otherwise true duplicates
+/// are silently kept as unique.
 #[derive(Debug, Clone)]
 pub struct OntDedupParams {
     /// Endpoint displacement (bases) allowed at each end at no cost.
@@ -305,6 +306,30 @@ mod tests {
         substitute(&mut read, 500);
         assert!(is_duplicate(&read, &seq, &params(0, 3)));
         assert!(is_duplicate(&seq, &read, &params(0, 3)));
+    }
+
+    #[test]
+    fn default_endpoint_rule() {
+        let d = OntDedupParams::default();
+        assert_eq!(
+            (d.max_end_offset, d.end_check_len, d.max_end_errors),
+            (2, 32, 3)
+        );
+        assert_eq!((d.max_error_frac, d.rc_tolerant), (0.04, true));
+        // With the defaults: 2 bases of displacement pass, 3 don't (even
+        // though 3 edits are allowed), and 3 substitutions in the 32-base
+        // window pass while 4 don't.
+        let mut rng = StdRng::seed_from_u64(13);
+        let seq = random_seq(1000, &mut rng);
+        assert!(is_duplicate(&seq[2..], &seq, &d));
+        assert!(!is_duplicate(&seq[3..], &seq, &d));
+        let mut read = seq.clone();
+        for pos in [4, 12, 20] {
+            substitute(&mut read, pos);
+        }
+        assert!(is_duplicate(&read, &seq, &d));
+        substitute(&mut read, 28);
+        assert!(!is_duplicate(&read, &seq, &d));
     }
 
     #[test]

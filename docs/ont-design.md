@@ -66,10 +66,11 @@ cluster greedily, and resolve the best exemplar at finalize.
    - Minimizers are chosen by a mixing hash, not the lexicographic 2-bit
      value, so poly-A k-mers aren't systematically preferred.
 2. **Buckets.** As in the Illumina path, each seed is a bucket key: a
-   leader is posted under each of its end seeds (up to 16 with the
+   leader is posted under each of its end seeds, with the end each came
+   from and its distance from that end. There are up to 16 seeds with the
    defaults; fewer for short reads or reads with non-ACGT or homopolymer
-   runs; none if either end has no seed, which leaves it a singleton), with the end it came
-   from and its distance from that end. Unlike Illumina, a candidate needs
+   runs. A leader with no seed at one end gets no postings and stays a
+   singleton. Unlike Illumina, a candidate needs
    evidence at *both* ends. A read's start seeds must hit one end of the
    leader and its end seeds the other, in a consistent orientation (start
    to start and end to end, or swapped for the reverse complement). Only
@@ -95,9 +96,12 @@ cluster greedily, and resolve the best exemplar at finalize.
      and the inner end free. Up to `max_end_offset` bases of displacement
      are free, and at most `max_end_errors` edits are allowed. Edit distance
      alone can't tell a displaced endpoint from indels at the boundary, so
-     each end is aligned twice: once with displacement limited to
-     `max_end_offset`, and once allowing more. If the second alignment is
-     strictly cheaper, the endpoints differ and the pair is rejected. This
+     an end may be aligned twice. The first alignment gets `max_end_offset`
+     bases of free displacement; displacement beyond that costs one edit
+     per base. The second gets `max_end_offset + max_end_errors` bases of
+     free displacement, and is only needed when the first costs something
+     but fits the allowance. If the second is strictly cheaper, the
+     endpoints differ and the pair is rejected. This
      keeps the error allowance from silently widening the endpoint
      tolerance. Low-complexity ends are inherently ambiguous under this
      rule.
@@ -163,9 +167,11 @@ cluster greedily, and resolve the best exemplar at finalize.
 - **Saturated groups.** When very many reads cover a short genome,
   independent molecules often share endpoints within the tolerance, so
   counts in such groups are approximate in both directions. These groups
-  are also slower per read: each seed matches many leaders. In a synthetic
-  test with millions of reads on one 7 kb genome, cost grew from about 60
-  to 130 µs per read as reads went from 1M to 8M.
+  are also slower per read: each seed matches many leaders, and the cost
+  grows with the number of leaders. For example, with all reads from one
+  7 kb genome (`ont_scale --genomes 1 --genome-len 7000`, default
+  parameters), per-read cost on our test machine went from about 43 to 74
+  µs as reads went from 1M to 4M. Typical inputs ran at 19-33 µs per read.
 - **Accuracy regime.** The defaults are a design assumption: reads of
   roughly 1% per-read error, typical of current high-accuracy ONT
   basecalling. Noisier reads need larger `max_error_frac` and `max_end_errors`.
