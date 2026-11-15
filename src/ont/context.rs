@@ -362,9 +362,10 @@ impl OntDedupContext {
                 let before = *bits;
                 *bits |= bit;
                 let completed = |b: u8, mask: u8| b & mask != mask && *bits & mask == mask;
-                if completed(before, SAME_STRAND)
-                    || (params.rc_tolerant && completed(before, OPPOSITE_STRAND))
-                {
+                // Either pattern queues the leader, even without RC tolerance:
+                // misleading seeds can produce crossed evidence for a forward
+                // duplicate, and `align_ready` applies the strand restriction.
+                if completed(before, SAME_STRAND) || completed(before, OPPOSITE_STRAND) {
                     ready.push(posting.cluster);
                 }
             }
@@ -541,14 +542,9 @@ mod tests {
             ctx.process_read_by_index(0, &leader, &qual);
             ctx.process_read_by_index(1, &read, &qual);
             ctx.finalize();
-            if rc_tolerant {
-                // Found via reverse-complement evidence, matched forward.
-                assert_eq!(ctx.stats(), (2, 1));
-            } else {
-                // Without RC tolerance the misleading evidence never
-                // qualifies, so the read isn't even a candidate.
-                assert_eq!(ctx.stats().1, 2);
-            }
+            // Found via reverse-complement evidence, matched forward, with
+            // or without RC tolerance.
+            assert_eq!(ctx.stats(), (2, 1), "rc_tolerant={rc_tolerant}");
         }
     }
 }

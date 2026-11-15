@@ -73,7 +73,9 @@ cluster greedily, and resolve the best exemplar at finalize.
    evidence at *both* ends. A read's start seeds must hit one end of the
    leader and its end seeds the other, in a consistent orientation (start
    to start and end to end, or swapped for the reverse complement). Only
-   then is it aligned, and only in that orientation.
+   then is it aligned. The evidence picks which orientation to try first;
+   if that fails, the other allowed orientation is tried too, because in
+   terminal inverted repeats seeds can point the wrong way.
    - **Offset filter.** Postings whose offsets differ from the read's by
      more than the endpoint allowance (plus indel drift proportional to the
      distance from the end) are ignored, since such a leader can't pass the
