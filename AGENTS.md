@@ -94,4 +94,8 @@ literature, or be supplied at runtime.
   FASTQ.
 - `tests/`: integration tests (`dedup_tests.rs`) and CLI tests
   (`cli_tests.rs`).
-- Build/test: `cargo build --release && cargo test --release`.
+- `ont-sim/`: dev-only ONT read simulator and dedup evaluator (see
+  `ont-sim/README.md`). Use it for all accuracy measurements.
+- Build/test: `cargo build --release && cargo test --release`. Format new
+  code with `cargo fmt -p <crate>` or rustfmt on new files only; the existing
+  Illumina code is not rustfmt-clean, and reformatting it is out of scope.

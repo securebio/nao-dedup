@@ -156,6 +156,15 @@ fn pair_metrics_and_identifiability() {
     let e = evaluate(&identical, &[(0, 0), (1, 0), (2, 0), (3, 0)]).unwrap();
     assert_eq!(e.identifiability.precision(), Some(1.0));
     assert_eq!(e.molecule.precision(), Some(1.0 / 3.0));
+    assert_eq!((e.merges, e.splits), (1, 0));
+    assert_eq!((e.identifiability_merges, e.identifiability_splits), (0, 0));
+    let e = evaluate(&identical, &[(0, 0), (1, 1), (2, 2), (3, 3)]).unwrap();
+    assert_eq!((e.merges, e.splits), (0, 2));
+    assert_eq!((e.identifiability_merges, e.identifiability_splits), (0, 1));
+    // Two reads from each of two distinct intervals in one cluster: one merge
+    // (counted per cluster, not per read) under both truths.
+    let e = evaluate(&t, &[(0, 0), (1, 0), (2, 0), (3, 0)]).unwrap();
+    assert_eq!((e.identifiability_merges, e.identifiability_splits), (1, 0));
     assert_eq!(evaluate(&[], &[]).unwrap().dedup_count_bias, None);
 }
 

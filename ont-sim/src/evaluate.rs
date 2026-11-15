@@ -1,5 +1,5 @@
 use crate::Truth;
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, hash::Hash};
 
 fn pairs(n: u64) -> u64 {
     n * n.saturating_sub(1) / 2
@@ -63,29 +63,85 @@ pub struct Evaluation {
     pub dedup_count_bias: Option<f64>,
     pub molecule: PairMetrics,
     pub identifiability: PairMetrics,
+    /// Predicted clusters containing more than one true molecule.
     pub merges: usize,
+    /// True molecules spread over more than one predicted cluster.
     pub splits: usize,
+    /// As `merges`, but molecules with identical endpoints count as one class,
+    /// so merges no endpoint-based method could avoid are excluded.
+    pub identifiability_merges: usize,
+    /// As `splits`, under identifiability truth.
+    pub identifiability_splits: usize,
     pub foldback: [Recall; 3], // neither, one, both; molecule truth
     pub strand: [Recall; 2],   // same, opposite; molecule truth
 }
 
+/// Unordered read-pair counts in each artifact stratum.
+#[derive(Clone, Copy, Default)]
+struct Strata {
+    foldback_neither: u64,
+    foldback_one: u64,
+    foldback_both: u64,
+    strand_same: u64,
+    strand_opposite: u64,
+}
+
+impl std::ops::AddAssign for Strata {
+    fn add_assign(&mut self, o: Self) {
+        self.foldback_neither += o.foldback_neither;
+        self.foldback_one += o.foldback_one;
+        self.foldback_both += o.foldback_both;
+        self.strand_same += o.strand_same;
+        self.strand_opposite += o.strand_opposite;
+    }
+}
+
+/// Read counts for one group of reads (a molecule, or a molecule/cluster cell).
 #[derive(Default)]
 struct Histogram {
     n: u64,
-    foldback: [u64; 2],
-    strand: [u64; 2],
+    with_foldback: u64,
+    rc: u64,
 }
+
 impl Histogram {
     fn add(&mut self, t: &Truth) {
         self.n += 1;
-        self.foldback[usize::from(t.foldback_len > 0)] += 1;
-        self.strand[usize::from(t.is_rc)] += 1;
+        self.with_foldback += u64::from(t.foldback_len > 0);
+        self.rc += u64::from(t.is_rc);
     }
-    fn strata(&self) -> [u64; 5] {
-        let [a, b] = self.foldback;
-        let [f, r] = self.strand;
-        [pairs(a), a * b, pairs(b), pairs(f) + pairs(r), f * r]
+
+    /// Pair counts within this group, by stratum.
+    fn strata(&self) -> Strata {
+        let (fold, plain) = (self.with_foldback, self.n - self.with_foldback);
+        let (rc, fwd) = (self.rc, self.n - self.rc);
+        Strata {
+            foldback_neither: pairs(plain),
+            foldback_one: plain * fold,
+            foldback_both: pairs(fold),
+            strand_same: pairs(fwd) + pairs(rc),
+            strand_opposite: fwd * rc,
+        }
     }
+}
+
+/// Count (merges, splits) from the distinct (truth class, predicted cluster)
+/// cells: clusters holding more than one class, and classes spread over more
+/// than one cluster.
+fn merges_and_splits<T: Hash + Eq, C: Hash + Eq>(
+    cells: impl Iterator<Item = (T, C)>,
+) -> (usize, usize) {
+    let mut classes_per_cluster: HashMap<C, usize> = HashMap::new();
+    let mut clusters_per_class: HashMap<T, usize> = HashMap::new();
+    for (class, cluster) in cells {
+        *classes_per_cluster.entry(cluster).or_default() += 1;
+        *clusters_per_class.entry(class).or_default() += 1;
+    }
+    let count = |n: &usize| *n > 1;
+    (
+        classes_per_cluster.values().filter(|n| count(n)).count(),
+        clusters_per_class.values().filter(|n| count(n)).count(),
+    )
 }
 
 /// Score unordered pairs in O(reads) expected time using contingency tables.
@@ -102,49 +158,50 @@ pub fn evaluate(truth: &[Truth], assignments: &[(usize, usize)]) -> Result<Evalu
     {
         return Err("truth indices must be unique; assign every truth read exactly once to a self-mapped exemplar".into());
     }
-    let (mut molecules, mut cells, mut identities, mut identity_cells, mut predicted) = (
-        HashMap::new(),
-        HashMap::new(),
-        HashMap::new(),
-        HashMap::new(),
-        HashMap::new(),
-    );
+
+    type Coord = (usize, usize, usize); // genome, start, end
+    // molecule_id -> (interval, reads in the molecule)
+    let mut molecules: HashMap<usize, (Coord, Histogram)> = HashMap::new();
+    // (molecule_id, exemplar) -> reads of that molecule in that cluster
+    let mut cells: HashMap<(usize, usize), Histogram> = HashMap::new();
+    // interval -> reads with that interval (identifiability classes)
+    let mut identities: HashMap<Coord, u64> = HashMap::new();
+    // (interval, exemplar) -> reads of that class in that cluster
+    let mut identity_cells: HashMap<(Coord, usize), u64> = HashMap::new();
+    // exemplar -> cluster size
+    let mut predicted: HashMap<usize, u64> = HashMap::new();
     for t in truth {
         let coord = (t.genome_id, t.mol_start, t.mol_end);
         let e = assigned[&t.read_idx];
-        let group = molecules
+        let molecule = molecules
             .entry(t.molecule_id)
-            .or_insert((coord, Histogram::default(), 0));
-        if coord != group.0 || t.mol_start >= t.mol_end {
+            .or_insert_with(|| (coord, Histogram::default()));
+        if coord != molecule.0 || t.mol_start >= t.mol_end {
             return Err("each molecule must have one consistent, nonempty genomic interval".into());
         }
-        group.1.add(t);
-        let cell = cells
-            .entry((t.molecule_id, e))
-            .or_insert_with(Histogram::default);
-        let cluster = predicted.entry(e).or_insert((0u64, 0));
-        if cell.n == 0 {
-            group.2 += 1;
-            cluster.1 += 1;
-        }
-        cell.add(t);
-        cluster.0 += 1;
-        *identities.entry(coord).or_insert(0u64) += 1;
-        *identity_cells.entry((coord, e)).or_insert(0u64) += 1;
+        molecule.1.add(t);
+        cells.entry((t.molecule_id, e)).or_default().add(t);
+        *predicted.entry(e).or_default() += 1;
+        *identities.entry(coord).or_default() += 1;
+        *identity_cells.entry((coord, e)).or_default() += 1;
     }
-    let mut strata = [0; 5];
-    let mut recovered = [0; 5];
-    for (_, h, _) in molecules.values() {
-        for (sum, n) in strata.iter_mut().zip(h.strata()) {
-            *sum += n;
-        }
+
+    let mut strata = Strata::default();
+    for (_, h) in molecules.values() {
+        strata += h.strata();
     }
+    let mut recovered = Strata::default();
     for h in cells.values() {
-        for (sum, n) in recovered.iter_mut().zip(h.strata()) {
-            *sum += n;
-        }
+        recovered += h.strata();
     }
-    let predicted_pairs = predicted.values().map(|(n, _)| pairs(*n)).sum();
+    let recall = |t: u64, r: u64| Recall {
+        true_pairs: t,
+        recovered_pairs: r,
+    };
+    let (merges, splits) = merges_and_splits(cells.keys().copied());
+    let (identifiability_merges, identifiability_splits) =
+        merges_and_splits(identity_cells.keys().copied());
+    let predicted_pairs = predicted.values().map(|n| pairs(*n)).sum();
     Ok(Evaluation {
         reads: truth.len(),
         true_molecules: molecules.len(),
@@ -153,7 +210,7 @@ pub fn evaluate(truth: &[Truth], assignments: &[(usize, usize)]) -> Result<Evalu
         dedup_count_bias: (!molecules.is_empty())
             .then(|| predicted.len() as f64 / molecules.len() as f64 - 1.0),
         molecule: PairMetrics {
-            true_pairs: molecules.values().map(|(_, h, _)| pairs(h.n)).sum(),
+            true_pairs: molecules.values().map(|(_, h)| pairs(h.n)).sum(),
             predicted_pairs,
             recovered_pairs: cells.values().map(|h| pairs(h.n)).sum(),
         },
@@ -162,16 +219,19 @@ pub fn evaluate(truth: &[Truth], assignments: &[(usize, usize)]) -> Result<Evalu
             predicted_pairs,
             recovered_pairs: identity_cells.values().map(|n| pairs(*n)).sum(),
         },
-        merges: predicted.values().filter(|(_, n)| *n > 1).count(),
-        splits: molecules.values().filter(|(_, _, n)| *n > 1).count(),
-        foldback: std::array::from_fn(|i| Recall {
-            true_pairs: strata[i],
-            recovered_pairs: recovered[i],
-        }),
-        strand: std::array::from_fn(|i| Recall {
-            true_pairs: strata[i + 3],
-            recovered_pairs: recovered[i + 3],
-        }),
+        merges,
+        splits,
+        identifiability_merges,
+        identifiability_splits,
+        foldback: [
+            recall(strata.foldback_neither, recovered.foldback_neither),
+            recall(strata.foldback_one, recovered.foldback_one),
+            recall(strata.foldback_both, recovered.foldback_both),
+        ],
+        strand: [
+            recall(strata.strand_same, recovered.strand_same),
+            recall(strata.strand_opposite, recovered.strand_opposite),
+        ],
     })
 }
 
@@ -182,6 +242,7 @@ impl Evaluation {
             concat!(
                 "{{\"reads\":{},\"true_molecules\":{},\"identifiability_classes\":{},",
                 "\"predicted_clusters\":{},\"dedup_count_bias\":{},\"merges\":{},\"splits\":{},",
+                "\"identifiability_merges\":{},\"identifiability_splits\":{},",
                 "\"molecule\":{},\"identifiability\":{},\"foldback\":{{\"neither\":{},\"one\":{},\"both\":{}}},",
                 "\"strand\":{{\"same\":{},\"opposite\":{}}}}}"
             ),
@@ -192,6 +253,8 @@ impl Evaluation {
             number(self.dedup_count_bias),
             self.merges,
             self.splits,
+            self.identifiability_merges,
+            self.identifiability_splits,
             self.molecule.json(),
             self.identifiability.json(),
             self.foldback[0].json(),
@@ -212,10 +275,12 @@ impl fmt::Display for Evaluation {
         )?;
         writeln!(
             f,
-            "dedup_count_bias={} merges={} splits={}",
+            "dedup_count_bias={} merges={} splits={} identifiability_merges={} identifiability_splits={}",
             number(self.dedup_count_bias),
             self.merges,
-            self.splits
+            self.splits,
+            self.identifiability_merges,
+            self.identifiability_splits
         )?;
         for (name, m) in [
             ("molecule", &self.molecule),

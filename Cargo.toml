@@ -5,6 +5,8 @@ edition = "2024"
 
 [workspace]
 members = ["ont-sim"]
+# Plain `cargo test` should cover the simulator too.
+default-members = [".", "ont-sim"]
 resolver = "3"
 
 [lib]

@@ -64,8 +64,8 @@ must occur in truth and map to itself. Headers and column counts are strict.
 
 Pair precision/recall use unordered, distinct read pairs and contingency counts.
 Both molecule truth and identifiability truth (equal `genome_id,start,end`) are
-reported. Merges, splits, count bias, and foldback/strand recall use molecule
-truth. Artifact strata describe pairs with neither/one/both nonzero foldbacks,
+reported. Merges and splits are reported under both truths; count bias and
+foldback/strand recall use molecule truth. Artifact strata describe pairs with neither/one/both nonzero foldbacks,
 and same/opposite strand. Missing denominators yield `None` in Rust and `null`
 in text/JSON; pair counts accompany metrics. No family-size weighting is applied
 beyond the natural number of pairs per family. Header-only inputs are valid.
