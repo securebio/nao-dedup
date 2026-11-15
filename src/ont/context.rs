@@ -600,12 +600,18 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "max_error_frac must be between 0 and 1")]
-    fn invalid_error_fraction_is_rejected() {
-        let params = OntDedupParams {
-            max_error_frac: -0.1,
-            ..Default::default()
+    fn error_fraction_must_be_between_zero_and_one() {
+        let make = |max_error_frac| {
+            let params = OntDedupParams {
+                max_error_frac,
+                ..Default::default()
+            };
+            std::panic::catch_unwind(|| OntDedupContext::new(params, OntMinimizerParams::default()))
+                .is_ok()
         };
-        OntDedupContext::new(params, OntMinimizerParams::default());
+        assert!(make(0.0) && make(1.0) && make(0.04));
+        for bad in [-0.1, 1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!make(bad), "{bad} accepted");
+        }
     }
 }
