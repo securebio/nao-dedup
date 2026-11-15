@@ -1,7 +1,7 @@
 //! Streaming ONT deduplication, mirroring the Illumina `DedupContext`.
 //!
 //! Reads arrive one at a time. Each read is compared only against cluster
-//! leaders that share a seed-pair bucket with it. It joins the first leader
+//! leaders whose seeds match it at both ends. It joins the first leader
 //! it matches; otherwise it starts a new cluster and becomes that cluster's
 //! leader. Leaders never change, so cluster membership is decided against a
 //! fixed sequence, and clusters never merge. The best read of each cluster
@@ -149,6 +149,19 @@ fn compatible_offset_range(a: u16, params: &OntDedupParams) -> (u16, u16) {
     (lo, hi)
 }
 
+/// The postings in an offset-sorted bucket whose offsets are compatible with
+/// `offset`.
+fn compatible_postings<'a>(
+    bucket: &'a [Posting],
+    offset: u16,
+    params: &OntDedupParams,
+) -> &'a [Posting] {
+    let (lo, hi) = compatible_offset_range(offset, params);
+    let first = bucket.partition_point(|p| p.offset < lo);
+    let last = bucket.partition_point(|p| p.offset <= hi);
+    &bucket[first..last]
+}
+
 /// Exemplar ranking: mean Phred quality first, then length, compared
 /// lexicographically. The arithmetic mean of Phred scores deliberately
 /// matches the Illumina path (issue #6 discusses better quality summaries).
@@ -173,7 +186,7 @@ pub struct OntDedupStats {
     pub reads: usize,
     /// Clusters created (one per leader).
     pub clusters: usize,
-    /// Reads that yielded no seed-pair keys (too short or no valid k-mers);
+    /// Reads without seeds at both ends (too short or no valid k-mers);
     /// each becomes a singleton cluster.
     pub unseeded_reads: usize,
     /// Bucket entries examined, summed over reads.
@@ -218,12 +231,18 @@ pub struct OntDedupContext {
 }
 
 impl OntDedupContext {
-    /// Panics if `minimizer_params` would fail `OntMinimizerParams::new`.
+    /// Panics if `minimizer_params` would fail `OntMinimizerParams::new`, or
+    /// if `dedup_params.max_error_frac` is not between 0 and 1.
     pub fn new(dedup_params: OntDedupParams, minimizer_params: OntMinimizerParams) -> Self {
         let p = &minimizer_params;
         if let Err(e) = OntMinimizerParams::new(p.kmer_len, p.window_len, p.num_windows) {
             panic!("invalid OntMinimizerParams: {e}");
         }
+        assert!(
+            (0.0..=1.0).contains(&dedup_params.max_error_frac),
+            "max_error_frac must be between 0 and 1, got {}",
+            dedup_params.max_error_frac
+        );
         Self {
             dedup_params,
             minimizer_params,
@@ -346,10 +365,7 @@ impl OntDedupContext {
             let Some(bucket) = self.buckets.get(&seed.hash) else {
                 continue;
             };
-            let (lo, hi) = compatible_offset_range(seed.offset, params);
-            let first = bucket.partition_point(|p| p.offset < lo);
-            let last = bucket.partition_point(|p| p.offset <= hi);
-            let in_range = &bucket[first..last];
+            let in_range = compatible_postings(bucket, seed.offset, params);
             self.stats.postings_visited += in_range.len();
             for posting in in_range {
                 let bit = match (read_at_end, posting.at_end) {
@@ -546,5 +562,50 @@ mod tests {
             // or without RC tolerance.
             assert_eq!(ctx.stats(), (2, 1), "rc_tolerant={rc_tolerant}");
         }
+    }
+
+    #[test]
+    fn bucket_lookup_returns_exactly_the_compatible_postings() {
+        let params = OntDedupParams::default();
+        let posting = |offset| Posting {
+            cluster: u32::from(offset),
+            offset,
+            at_end: false,
+        };
+        let bucket: Vec<Posting> = (0..400).map(posting).collect();
+        for a in [0, 1, 50, 200, 399] {
+            let found: Vec<u16> = compatible_postings(&bucket, a, &params)
+                .iter()
+                .map(|p| p.offset)
+                .collect();
+            let expected: Vec<u16> = (0..400)
+                .filter(|&b| offsets_compatible(a, b, &params))
+                .collect();
+            assert_eq!(found, expected, "a={a}");
+        }
+    }
+
+    #[test]
+    fn evidence_resets_when_its_stamp_wraps() {
+        let mut evidence = Evidence::default();
+        evidence.start_read(2);
+        *evidence.bits(0) = START_START;
+        // Force the stamp to wrap on the next read, then again after a cycle.
+        evidence.stamp = u32::MAX;
+        evidence.entries[1] = (1, END_END); // would look current after a naive wrap
+        evidence.start_read(2);
+        assert_eq!(evidence.stamp, 1);
+        assert_eq!(*evidence.bits(0), 0);
+        assert_eq!(*evidence.bits(1), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_error_frac must be between 0 and 1")]
+    fn invalid_error_fraction_is_rejected() {
+        let params = OntDedupParams {
+            max_error_frac: -0.1,
+            ..Default::default()
+        };
+        OntDedupContext::new(params, OntMinimizerParams::default());
     }
 }

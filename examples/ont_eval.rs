@@ -2,8 +2,8 @@
 //!
 //! For local tuning sweeps, e.g.:
 //!   cargo run --release --example ont_eval -- \
-//!     --sub-rate 0.004 --ins-rate 0.004 --del-rate 0.004 --n-molecules 20000
-//! (Error rates here are illustrative, not a model of any instrument.)
+//!     --sub-rate <P> --ins-rate <P> --del-rate <P> --n-molecules 20000
+//! (Error rates are required; choose them to suit the reads being modeled.)
 
 use clap::Parser;
 use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams};
@@ -74,9 +74,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         print!("{result}");
         println!(
-            "seconds={seconds:.3} us_per_read={:.2} unseeded_reads={} candidates_per_read={:.3}",
+            "seconds={seconds:.3} us_per_read={:.2} unseeded_reads={} postings_per_read={:.1} candidates_per_read={:.3}",
             seconds * 1e6 / sim.reads.len().max(1) as f64,
             stats.unseeded_reads,
+            stats.postings_visited as f64 / sim.reads.len().max(1) as f64,
             stats.candidates_compared as f64 / sim.reads.len().max(1) as f64
         );
     }

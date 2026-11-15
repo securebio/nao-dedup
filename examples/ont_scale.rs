@@ -3,7 +3,7 @@
 //! generated on the fly and never stored, so tens of millions are feasible.
 //!
 //!   cargo run --release --example ont_scale -- --reads 10000000 \
-//!     --sub-rate 0.004 --ins-rate 0.004 --del-rate 0.004
+//!     --sub-rate <P> --ins-rate <P> --del-rate <P>
 //!
 //! Error rates are required and illustrative. Molecules are drawn uniformly
 //! over the genomes, each family gets a geometric number of reads, and reads
