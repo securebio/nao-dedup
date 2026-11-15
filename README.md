@@ -94,6 +94,39 @@ Single-threaded; we parallelize by running multiple files concurrently.
 
 ---
 
+## ONT (Nanopore) Deduplication
+
+`dedup_ont_fastq` deduplicates single-end ONT reads. PCR copies of a
+fragment share both of its endpoints, so two reads are duplicates when both
+endpoints agree within a few bases and the sequences match within an
+indel-aware edit budget. Reads from opposite strands match by default. See
+[docs/ont-design.md](docs/ont-design.md) for the design.
+
+```bash
+cargo build --release --bin dedup_ont_fastq
+./target/release/dedup_ont_fastq input.fastq.gz output.fastq.gz \
+  --assignments assignments.tsv
+```
+
+- **Input**: a FASTQ file, gzip-compressed or plain. It is read twice, so it
+  can't be a stream.
+- **Output**: one exemplar record per duplicate group, unchanged except that
+  line endings are normalized to `\n`. The output
+  is gzip-compressed if the path ends in `.gz`; otherwise it is plain, which
+  is faster and can be piped to a parallel compressor.
+- **`--assignments`** writes `read_idx`/`exemplar_idx` for every read (0-based
+  input positions).
+- **`--no-rc`** only matches reads in the same orientation, for directional
+  libraries.
+- **Other parameters**: `--help` lists the endpoint and seed parameters.
+
+From Rust, use `nao_dedup::ont::OntDedupContext`. It has the same shape as
+`DedupContext` (`process_read_by_index`, `finalize`, `get_exemplar_index`,
+`get_exemplar_indices`, `stats`), but takes one `&[u8]` sequence and quality
+per read.
+
+---
+
 ## Rust Library
 
 For integrating deduplication into your own Rust programs.
@@ -300,4 +333,5 @@ To run specific test suites:
 cargo test --lib           # Unit tests only
 cargo test --test dedup_tests  # Integration tests
 cargo test --test cli_tests    # CLI tests
+cargo test --test ont_tests --test ont_cli_tests  # ONT library and CLI
 ```

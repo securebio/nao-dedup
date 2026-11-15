@@ -17,6 +17,10 @@ crate-type = ["rlib"]
 name = "dedup_interleaved_fastq"
 path = "src/dedup_interleaved_fastq.rs"
 
+[[bin]]
+name = "dedup_ont_fastq"
+path = "src/dedup_ont_fastq.rs"
+
 [dependencies]
 ahash = "0.8"
 rustc-hash = "2.1"
