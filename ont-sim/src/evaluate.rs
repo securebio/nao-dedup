@@ -1,5 +1,9 @@
 use crate::Truth;
-use std::{collections::HashMap, fmt, hash::Hash};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    hash::Hash,
+};
 
 fn pairs(n: u64) -> u64 {
     n * n.saturating_sub(1) / 2
@@ -56,6 +60,14 @@ impl Recall {
 
 #[derive(Debug)]
 pub struct Evaluation {
+    /// True molecules with no read selected as an exemplar.
+    pub lost_molecules: usize,
+    /// Lost molecules with at least one read assigned across genomes.
+    pub lost_molecules_cross_genome: usize,
+    /// Observed genomes with no exemplar read.
+    pub lost_genomes: usize,
+    /// Exemplars beyond one per represented true molecule.
+    pub extra_exemplars: usize,
     pub reads: usize,
     pub true_molecules: usize,
     pub identifiability_classes: usize,
@@ -144,7 +156,7 @@ fn merges_and_splits<T: Hash + Eq, C: Hash + Eq>(
     )
 }
 
-/// Score unordered pairs in O(reads) expected time using contingency tables.
+/// Score evidence loss and unordered pairs in O(reads) expected time.
 /// Indices may be sparse; row order is irrelevant. Undefined ratios are None.
 pub fn evaluate(truth: &[Truth], assignments: &[(usize, usize)]) -> Result<Evaluation, String> {
     let rows: HashMap<_, _> = truth.iter().map(|t| (t.read_idx, t)).collect();
@@ -170,9 +182,20 @@ pub fn evaluate(truth: &[Truth], assignments: &[(usize, usize)]) -> Result<Evalu
     let mut identity_cells: HashMap<(Coord, usize), u64> = HashMap::new();
     // exemplar -> cluster size
     let mut predicted: HashMap<usize, u64> = HashMap::new();
+    let mut represented_molecules = HashSet::new();
+    let mut cross_genome_molecules = HashSet::new();
+    let mut genomes: HashMap<usize, bool> = HashMap::new();
     for t in truth {
         let coord = (t.genome_id, t.mol_start, t.mol_end);
         let e = assigned[&t.read_idx];
+        let represented_genome = genomes.entry(t.genome_id).or_default();
+        if e == t.read_idx {
+            represented_molecules.insert(t.molecule_id);
+            *represented_genome = true;
+        }
+        if rows[&e].genome_id != t.genome_id {
+            cross_genome_molecules.insert(t.molecule_id);
+        }
         let molecule = molecules
             .entry(t.molecule_id)
             .or_insert_with(|| (coord, Histogram::default()));
@@ -203,6 +226,15 @@ pub fn evaluate(truth: &[Truth], assignments: &[(usize, usize)]) -> Result<Evalu
         merges_and_splits(identity_cells.keys().copied());
     let predicted_pairs = predicted.values().map(|n| pairs(*n)).sum();
     Ok(Evaluation {
+        lost_molecules: molecules.len() - represented_molecules.len(),
+        lost_molecules_cross_genome: cross_genome_molecules
+            .difference(&represented_molecules)
+            .count(),
+        lost_genomes: genomes
+            .values()
+            .filter(|represented| !**represented)
+            .count(),
+        extra_exemplars: predicted.len() - represented_molecules.len(),
         reads: truth.len(),
         true_molecules: molecules.len(),
         identifiability_classes: identities.len(),
@@ -236,16 +268,35 @@ pub fn evaluate(truth: &[Truth], assignments: &[(usize, usize)]) -> Result<Evalu
 }
 
 impl Evaluation {
+    pub fn lost_molecule_rate(&self) -> Option<f64> {
+        ratio(self.lost_molecules as u64, self.true_molecules as u64)
+    }
+
+    pub fn missed_duplicate_rate(&self) -> Option<f64> {
+        ratio(
+            self.extra_exemplars as u64,
+            (self.reads - self.true_molecules) as u64,
+        )
+    }
+
     /// Numeric JSON only; no external serialization dependency is needed.
     pub fn to_json(&self) -> String {
         format!(
             concat!(
-                "{{\"reads\":{},\"true_molecules\":{},\"identifiability_classes\":{},",
+                "{{\"lost_molecules\":{},\"lost_molecules_cross_genome\":{},\"lost_genomes\":{},",
+                "\"extra_exemplars\":{},\"lost_molecule_rate\":{},\"missed_duplicate_rate\":{},",
+                "\"reads\":{},\"true_molecules\":{},\"identifiability_classes\":{},",
                 "\"predicted_clusters\":{},\"dedup_count_bias\":{},\"merges\":{},\"splits\":{},",
                 "\"identifiability_merges\":{},\"identifiability_splits\":{},",
                 "\"molecule\":{},\"identifiability\":{},\"foldback\":{{\"neither\":{},\"one\":{},\"both\":{}}},",
                 "\"strand\":{{\"same\":{},\"opposite\":{}}}}}"
             ),
+            self.lost_molecules,
+            self.lost_molecules_cross_genome,
+            self.lost_genomes,
+            self.extra_exemplars,
+            number(self.lost_molecule_rate()),
+            number(self.missed_duplicate_rate()),
             self.reads,
             self.true_molecules,
             self.identifiability_classes,
@@ -268,6 +319,20 @@ impl Evaluation {
 
 impl fmt::Display for Evaluation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "lost_molecules={} lost_molecule_rate={} lost_molecules_cross_genome={} lost_genomes={}",
+            self.lost_molecules,
+            number(self.lost_molecule_rate()),
+            self.lost_molecules_cross_genome,
+            self.lost_genomes
+        )?;
+        writeln!(
+            f,
+            "extra_exemplars={} missed_duplicate_rate={}",
+            self.extra_exemplars,
+            number(self.missed_duplicate_rate())
+        )?;
         writeln!(
             f,
             "reads={} true_molecules={} identifiability_classes={} predicted_clusters={}",

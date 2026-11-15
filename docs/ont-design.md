@@ -143,6 +143,10 @@ cluster greedily, and resolve the best exemplar at finalize.
 
 ## Validation
 
+- **Evidence loss and near misses.** The evaluator reports lost molecules,
+  lost genomes, and extra exemplars; `examples/ont_nearmiss.rs` measures pair
+  merge probability across sequence divergence and endpoint offsets through
+  the full deduplicator, with an identical-template duplicate control.
 - **Simulator.** Genomes yield molecules with defined endpoints, including
   dense coverage and nearby-but-distinct endpoints. Molecules form PCR
   families of various sizes, and each read gets independent substitution,

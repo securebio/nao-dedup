@@ -38,6 +38,206 @@ fn truth(i: usize, molecule: usize) -> Truth {
 }
 
 #[test]
+fn evidence_metrics_count_molecules_and_genomes_once() {
+    let t: Vec<_> = (0..4).map(|i| truth(i, i / 2)).collect();
+    let mut cross = t.clone();
+    cross[2].genome_id = 1;
+    cross[3].genome_id = 1;
+    for (truth, assignments, counts, rates) in [
+        (
+            &t,
+            vec![(0, 0), (1, 0), (2, 2), (3, 2)],
+            [0, 0, 0, 0],
+            ["0", "0"],
+        ),
+        (
+            &t,
+            vec![(0, 0), (1, 0), (2, 0), (3, 0)],
+            [1, 0, 0, 0],
+            ["0.5", "0"],
+        ),
+        (
+            &cross,
+            vec![(0, 0), (1, 0), (2, 0), (3, 0)],
+            [1, 1, 1, 0],
+            ["0.5", "0"],
+        ),
+        (
+            &t,
+            vec![(0, 0), (1, 1), (2, 2), (3, 2)],
+            [0, 0, 0, 1],
+            ["0", "0.5"],
+        ),
+        // Molecule 0 is split, but still represented by exemplar 0.
+        (
+            &cross,
+            vec![(0, 0), (1, 2), (2, 2), (3, 2)],
+            [0, 0, 0, 0],
+            ["0", "0"],
+        ),
+        (&vec![], vec![], [0, 0, 0, 0], ["null", "null"]),
+    ] {
+        let e = evaluate(truth, &assignments).unwrap();
+        assert_eq!(
+            [
+                e.lost_molecules,
+                e.lost_molecules_cross_genome,
+                e.lost_genomes,
+                e.extra_exemplars
+            ],
+            counts
+        );
+        assert_eq!(e.lost_molecule_rate(), rates[0].parse::<f64>().ok());
+        assert_eq!(e.missed_duplicate_rate(), rates[1].parse::<f64>().ok());
+        let json = e.to_json();
+        for (key, value) in [
+            "lost_molecules",
+            "lost_molecules_cross_genome",
+            "lost_genomes",
+            "extra_exemplars",
+        ]
+        .into_iter()
+        .zip(counts)
+        {
+            assert!(json.contains(&format!("\"{key}\":{value}")), "{json}");
+        }
+        for (key, value) in ["lost_molecule_rate", "missed_duplicate_rate"]
+            .into_iter()
+            .zip(rates)
+        {
+            assert!(json.contains(&format!("\"{key}\":{value}")), "{json}");
+        }
+        assert!(e.to_string().starts_with("lost_molecules="));
+    }
+    let e = evaluate(&[truth(10, 0), truth(20, 1)], &[(20, 10), (10, 10)]).unwrap();
+    assert!(e.to_json().contains("\"missed_duplicate_rate\":null"));
+}
+
+#[test]
+fn lost_molecule_can_span_clusters_while_its_genome_survives() {
+    let mut t: Vec<_> = (0..6).map(|i| truth(i, i / 2)).collect();
+    for row in &mut t[2..] {
+        row.genome_id = 1;
+    }
+    // Molecule 1 loses both reads, one across genomes and one within genome 1.
+    // Genome 1 still has exemplar 4 from molecule 2.
+    let e = evaluate(&t, &[(0, 0), (1, 0), (2, 0), (3, 4), (4, 4), (5, 4)]).unwrap();
+    assert_eq!(
+        (
+            e.lost_molecules,
+            e.lost_molecules_cross_genome,
+            e.lost_genomes,
+            e.extra_exemplars
+        ),
+        (1, 1, 0, 0)
+    );
+}
+
+#[test]
+fn zero_divergence_preserves_seeded_output() {
+    let mut c = config();
+    c.n_genomes = 3;
+    c.genome_len = 20;
+    c.n_molecules = 3;
+    c.len_min = 8;
+    c.len_max = 12;
+    c.len_median = 10.0;
+    c.family_mean = 1.0;
+    let s = simulate(&c).unwrap();
+    let output: Vec<_> = s
+        .reads
+        .iter()
+        .map(|r| {
+            let t = &r.truth;
+            (
+                r.sequence.as_slice(),
+                r.quality.as_slice(),
+                t.molecule_id,
+                t.genome_id,
+                t.mol_start,
+                t.mol_end,
+                t.is_rc,
+            )
+        })
+        .collect();
+    assert_eq!(
+        output,
+        vec![
+            (&b"CATAGATGGC"[..], &b"88=9==8>:9"[..], 0, 0, 9, 19, true),
+            (
+                &b"ACTGGAAGGTGA"[..],
+                &b".1+/,.0,0.-0"[..],
+                2,
+                1,
+                5,
+                17,
+                true
+            ),
+            (&b"GATGGCGTC"[..], &b"*0/+.--//"[..], 1, 0, 6, 15, true),
+        ]
+    );
+}
+
+#[test]
+fn related_genomes_copy_reference_with_substitutions_only() {
+    #[derive(Parser)]
+    struct Args {
+        #[command(flatten)]
+        config: SimConfig,
+    }
+    let parsed = Args::try_parse_from([
+        "sim",
+        "--sub-rate",
+        "0",
+        "--ins-rate",
+        "0",
+        "--del-rate",
+        "0",
+        "--genome-divergence",
+        "0.25",
+    ]);
+    assert!(parsed.is_ok(), "--genome-divergence must be accepted");
+    let mut c = parsed.unwrap().config;
+    c.n_genomes = 3;
+    c.genome_len = 10_000;
+    c.n_molecules = 0;
+    let s = simulate(&c).unwrap();
+    assert_eq!(s, simulate(&c).unwrap());
+    for genome in &s.genomes[1..] {
+        assert_eq!(genome.len(), c.genome_len);
+        let changed = genome
+            .iter()
+            .zip(&s.genomes[0])
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!((changed as f64 / c.genome_len as f64 - 0.25).abs() < 0.02);
+    }
+    let changed = s.genomes[1]
+        .iter()
+        .zip(&s.genomes[2])
+        .filter(|(a, b)| a != b)
+        .count();
+    // Independent substitutions can coincide: divergence is 2p - 4p²/3.
+    assert!((changed as f64 / c.genome_len as f64 - (0.5 - 0.25 / 3.0)).abs() < 0.02);
+    c.genome_divergence = 1.0;
+    let all_changed = simulate(&c).unwrap();
+    for genome in &all_changed.genomes[1..] {
+        assert!(
+            genome
+                .iter()
+                .zip(&all_changed.genomes[0])
+                .all(|(a, b)| a != b)
+        );
+    }
+    c.genome_divergence = 0.0;
+    assert_eq!(s.genomes[0], simulate(&c).unwrap().genomes[0]);
+    for p in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
+        c.genome_divergence = p;
+        assert!(simulate(&c).is_err());
+    }
+}
+
+#[test]
 fn deterministic_and_reverse_complement_truth() {
     assert_eq!(simulate::reverse_complement(b"ACGTT"), b"AACGT");
     let mut c = config();
@@ -295,13 +495,27 @@ fn errors_change_bases_and_homopolymers_modify_indels() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(7);
     let mut c = config();
     c.sub_rate = 1.0;
-    let (s, counts) = simulate::errors(b"AAACGTTT", &c, &mut rng);
+    let (s, counts) = add_errors(
+        b"AAACGTTT",
+        c.sub_rate,
+        c.ins_rate,
+        c.del_rate,
+        c.homopolymer_indel_mult,
+        &mut rng,
+    );
     assert_eq!(counts, [8, 0, 0]);
     assert!(s.iter().zip(b"AAACGTTT").all(|(a, b)| a != b));
     c.sub_rate = 0.0;
     c.ins_rate = 1.0;
     c.homopolymer_indel_mult = 0.0;
-    let (s, counts) = simulate::errors(b"AAACGTTT", &c, &mut rng);
+    let (s, counts) = add_errors(
+        b"AAACGTTT",
+        c.sub_rate,
+        c.ins_rate,
+        c.del_rate,
+        c.homopolymer_indel_mult,
+        &mut rng,
+    );
     assert_eq!(counts, [0, 2, 0]);
     assert_eq!(
         (&s[..3], s[4], s[6], &s[7..]),
@@ -309,6 +523,13 @@ fn errors_change_bases_and_homopolymers_modify_indels() {
     );
     c.ins_rate = 0.0;
     c.del_rate = 1.0;
-    let (s, counts) = simulate::errors(b"AAACGTTT", &c, &mut rng);
+    let (s, counts) = add_errors(
+        b"AAACGTTT",
+        c.sub_rate,
+        c.ins_rate,
+        c.del_rate,
+        c.homopolymer_indel_mult,
+        &mut rng,
+    );
     assert_eq!((s, counts), (b"AAATTT".to_vec(), [0, 0, 2]));
 }

@@ -22,6 +22,9 @@ pub struct SimConfig {
     pub n_genomes: usize,
     #[arg(long, default_value_t = 100_000)]
     pub genome_len: usize,
+    /// Per-base substitution probability from genome 0; zero draws independent genomes.
+    #[arg(long, default_value_t = 0.0)]
+    pub genome_divergence: f64,
     #[arg(long, default_value_t = 1_000)]
     pub n_molecules: usize,
     #[arg(long, default_value_t = 1_000.0)]
@@ -90,6 +93,7 @@ pub struct Simulation {
 impl SimConfig {
     pub fn validate(&self) -> Result<(), String> {
         let probabilities = [
+            self.genome_divergence,
             self.sub_rate,
             self.ins_rate,
             self.del_rate,
@@ -191,7 +195,19 @@ fn jitter_ends(s: Vec<u8>, amount: usize, rng: &mut StdRng) -> Vec<u8> {
     out
 }
 
-pub(crate) fn errors(s: &[u8], c: &SimConfig, rng: &mut StdRng) -> (Vec<u8>, [usize; 3]) {
+/// Add independent per-source-base ONT errors to an uppercase ACGT sequence.
+/// Returns the emitted sequence and [substitution, insertion, deletion] counts.
+/// Insertions precede their source base; substitutions are conditional on retention.
+/// Runs of at least three identical bases multiply indel probabilities (capped at 1).
+/// Callers must supply rates in [0,1] and a finite, nonnegative multiplier.
+pub fn add_errors(
+    s: &[u8],
+    sub_rate: f64,
+    ins_rate: f64,
+    del_rate: f64,
+    homopolymer_indel_mult: f64,
+    rng: &mut StdRng,
+) -> (Vec<u8>, [usize; 3]) {
     let (mut out, mut counts, mut start) = (Vec::with_capacity(s.len()), [0; 3], 0);
     while start < s.len() {
         let mut end = start + 1;
@@ -199,18 +215,18 @@ pub(crate) fn errors(s: &[u8], c: &SimConfig, rng: &mut StdRng) -> (Vec<u8>, [us
             end += 1;
         }
         let mult = if end - start >= 3 {
-            c.homopolymer_indel_mult
+            homopolymer_indel_mult
         } else {
             1.0
         };
         for &b in &s[start..end] {
-            if rng.gen_bool((c.ins_rate * mult).min(1.0)) {
+            if rng.gen_bool((ins_rate * mult).min(1.0)) {
                 out.push(base(rng));
                 counts[1] += 1;
             }
-            if rng.gen_bool((c.del_rate * mult).min(1.0)) {
+            if rng.gen_bool((del_rate * mult).min(1.0)) {
                 counts[2] += 1;
-            } else if rng.gen_bool(c.sub_rate) {
+            } else if rng.gen_bool(sub_rate) {
                 out.push(substitution(b, rng));
                 counts[0] += 1;
             } else {
@@ -226,9 +242,25 @@ pub(crate) fn errors(s: &[u8], c: &SimConfig, rng: &mut StdRng) -> (Vec<u8>, [us
 pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
     c.validate()?;
     let mut rng = StdRng::seed_from_u64(c.seed);
-    let genomes: Vec<Vec<u8>> = (0..c.n_genomes)
-        .map(|_| (0..c.genome_len).map(|_| base(&mut rng)).collect())
-        .collect();
+    // Keep the zero-divergence path's draws exactly as before.
+    let mut genomes: Vec<Vec<u8>> = Vec::with_capacity(c.n_genomes);
+    for i in 0..c.n_genomes {
+        let genome = if i == 0 || c.genome_divergence == 0.0 {
+            (0..c.genome_len).map(|_| base(&mut rng)).collect()
+        } else {
+            genomes[0]
+                .iter()
+                .map(|&b| {
+                    if rng.gen_bool(c.genome_divergence) {
+                        substitution(b, &mut rng)
+                    } else {
+                        b
+                    }
+                })
+                .collect()
+        };
+        genomes.push(genome);
+    }
     let hotspots: Vec<Vec<_>> = (0..c.n_genomes)
         .map(|_| {
             (0..if matches!(c.endpoints, Endpoints::Hotspot) {
@@ -291,7 +323,14 @@ pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
             };
             s.extend(std::iter::repeat_n(b'A', polya_len));
             s = jitter_ends(s, c.end_jitter, &mut rng);
-            let (sequence, [n_sub, n_ins, n_del]) = errors(&s, c, &mut rng);
+            let (sequence, [n_sub, n_ins, n_del]) = add_errors(
+                &s,
+                c.sub_rate,
+                c.ins_rate,
+                c.del_rate,
+                c.homopolymer_indel_mult,
+                &mut rng,
+            );
             let q = rng.gen_range(c.qual_min..=c.qual_max) as i16;
             let quality: Vec<u8> = (0..sequence.len())
                 .map(|_| (q + rng.gen_range(-3..=3)).clamp(2, 50) as u8 + 33)

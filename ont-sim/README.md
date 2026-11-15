@@ -27,6 +27,13 @@ held in memory; this is intended for tuning datasets, not streaming at scale.
 
 Truth and model semantics:
 
+- Genomes are independent random sequences by default. With
+  `--genome-divergence D > 0`, genome 0 is random and each other genome copies
+  it with independent per-base substitutions of probability D, always to a
+  different base. D must be finite and in [0,1]. Coordinates remain comparable
+  across genomes. For small D, pairwise divergence between two non-reference
+  genomes is about twice D (exactly `2D - 4D²/3` in expectation). D=0 preserves
+  the original independent-genome behavior and RNG draw order.
 - Each `molecule_id` is a separately drawn molecule, even when another molecule
   has identical endpoints. Coordinates are zero-based, half-open `[start,end)`
   on the forward genome, before PCR mutations, strand choice, and artifacts.
@@ -50,6 +57,9 @@ Truth and model semantics:
   multiply both indel probabilities, capped at 1. Runs include added artifacts.
   The error counts describe sequencing errors only; a deleted base cannot also
   count as a substitution. All-deleted reads may be empty.
+  The public `add_errors(seq, sub, ins, del, homopolymer_indel_mult, rng)`
+  function shares this model and returns the sequence and `[sub, ins, del]`
+  event counts; callers supply the probabilities and RNG.
 - `is_rc` records strand choice; `foldback_len` and `polya_len` record appended
   lengths **before** jitter and sequencing errors, not surviving tail lengths.
   Mean quality is drawn as an integer, with independent uniform ±3 noise per
@@ -62,10 +72,49 @@ Truth TSV has the exact header exported as `TRUTH_HEADER`; `is_rc` is `true` or
 every truth index. Rows may be unordered; indices may be sparse. Every exemplar
 must occur in truth and map to itself. Headers and column counts are strict.
 
-Pair precision/recall use unordered, distinct read pairs and contingency counts.
+Evidence-level metrics are the headline in text and are also available in JSON:
+
+- `lost_molecules`: true molecules none of whose reads is an exemplar (a read
+  assigned to itself). This counts evidence lost to false merges.
+- `lost_molecules_cross_genome`: lost molecules with at least one read assigned
+  to an exemplar from a different `genome_id`.
+- `lost_genomes`: observed genome IDs with no exemplar read.
+- `extra_exemplars`: predicted clusters minus represented true molecules,
+  where represented molecules = `true_molecules - lost_molecules`. This
+  nonnegative count measures missed duplicates beyond one exemplar per molecule.
+- `lost_molecule_rate` divides lost molecules by true molecules;
+  `missed_duplicate_rate` divides extra exemplars by `reads - true_molecules`.
+  A molecule split across clusters is still represented if any of its reads is
+  an exemplar. Counts give each molecule equal weight regardless of family size.
+
+The existing pair precision/recall use unordered, distinct read pairs and contingency counts.
 Both molecule truth and identifiability truth (equal `genome_id,start,end`) are
 reported. Merges and splits are reported under both truths; count bias and
 foldback/strand recall use molecule truth. Artifact strata describe pairs with neither/one/both nonzero foldbacks,
 and same/opposite strand. Missing denominators yield `None` in Rust and `null`
 in text/JSON; pair counts accompany metrics. No family-size weighting is applied
 beyond the natural number of pairs per family. Header-only inputs are valid.
+
+The root example `examples/ont_nearmiss.rs` measures isolated-pair merge
+probability using the full deduplicator, including seed retrieval:
+
+```sh
+cargo run --release --example ont_nearmiss -- \
+  --sub-rate <P> --ins-rate <P> --del-rate <P>
+```
+
+It sweeps `--divergences`, `--offsets`, and `--modes one,both`, with `--trials`
+independent pairs per cell and a reproducible `--seed`. Template lengths are
+uniform in `--len-min..=--len-max`. Variants are substitutions or single-base
+indels (`--variant-indel-frac`), with endpoint offsets measured in source
+coordinates via a boundary map. Insertions belong to the following source base;
+deletions collapse adjacent boundaries. Mode `one` shifts one random end, and
+mode `both` shifts each end independently, with random signs. Lengths must
+exceed the largest inward shift (twice the maximum offset for mode `both`), so
+endpoints cannot cross. Sequencing errors use `add_errors`; each read then has
+an independent 50% reverse-complement probability, including with `--no-rc`.
+
+TSV stdout reports merge counts, rates, and the upper endpoint of the two-sided
+95% Wilson score interval. Divergence=0, offset=0 is a duplicate control: its
+merge rate measures true-pair recall. Other cells measure false merges between
+distinct molecules. Deduplication/minimizer flags match `ont_eval`.

@@ -1,4 +1,4 @@
-//! Deterministic synthetic ONT reads and pair-count evaluation; see ../README.md.
+//! Deterministic synthetic ONT reads and evidence/pair evaluation; see ../README.md.
 mod evaluate;
 mod io;
 mod simulate;

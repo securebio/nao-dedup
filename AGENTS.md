@@ -100,7 +100,8 @@ literature, or be supplied at runtime.
   storage, `context`), and
   `src/dedup_ont_fastq.rs`: the ONT CLI. Tests are in `tests/ont_tests.rs`
   and `tests/ont_cli_tests.rs`; `examples/ont_eval.rs` runs simulation
-  sweeps, and `examples/ont_scale.rs` measures throughput and memory at
+  sweeps, `examples/ont_nearmiss.rs` measures near-miss pair merge probability,
+  and `examples/ont_scale.rs` measures throughput and memory at
   tens of millions of reads.
 - `tests/`: integration tests (`dedup_tests.rs`) and CLI tests
   (`cli_tests.rs`).
