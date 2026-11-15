@@ -28,7 +28,7 @@ use std::ops::Range;
 /// The defaults suit reads of roughly 1% per-read error (typical of current
 /// ONT chemistry and high-accuracy basecalling): two such reads differ by
 /// about 2%, comfortably inside `max_error_frac`. They were chosen by sweeps
-/// on simulated reads. Noisier reads need a larger `max_error_frac` and
+/// on simulated reads and checked against real data. Noisier reads need a larger `max_error_frac` and
 /// `max_end_errors`; otherwise true duplicates are silently kept as unique.
 #[derive(Debug, Clone)]
 pub struct OntDedupParams {
@@ -48,8 +48,8 @@ impl Default for OntDedupParams {
     fn default() -> Self {
         Self {
             max_end_offset: 2,
-            end_check_len: 64,
-            max_end_errors: 5,
+            end_check_len: 32,
+            max_end_errors: 3,
             max_error_frac: 0.04,
             rc_tolerant: true,
         }

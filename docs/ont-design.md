@@ -1,7 +1,7 @@
 # ONT deduplication: design
 
-Status: proposed design for the `ont` module. It will be updated as the
-implementation and measurements progress.
+Status: describes the implemented `ont` module (`src/ont/`) and the
+`dedup_ont_fastq` CLI.
 
 ## Goal
 
@@ -38,20 +38,18 @@ endpoints and sequence"), not guaranteed molecular counts.
 Separately, this version deliberately does not merge truncated copies, which
 share only one endpoint.
 
-## Read normalization
+## Read ends
 
-Raw ONT read ends can include sequence that is not part of the template
-fragment. Examples are foldback reads, where the read continues into the
-reverse complement of the molecule, and homopolymer tails.
-Requiring raw ends to match would miss these duplicates. Loosening
-`max_end_offset` enough to absorb them would give up endpoint specificity.
+Raw read ends are compared as they are. Some ONT reads end in sequence that
+isn't part of the template's forward strand, most notably foldback reads,
+which continue into the reverse complement of the molecule. Reads are not
+trimmed for this. If a foldback forms before PCR, all copies of the
+molecule carry it, and they match without trimming; trimming each read
+independently would only add jitter at the cut. Libraries where foldbacks
+arise independently in each read would need a trimming step.
 
-Instead, each read gets a *virtual* biological interval. Conservatively
-detected foldback tails are excluded from it. Seeding, comparison, and
-quality scoring all use this interval, but output keeps the original record
-unchanged. If detection is uncertain, the read is left untrimmed. Homopolymer
-tails are not trimmed; single-base homopolymer k-mers are simply not used as
-seeds.
+Single-base homopolymer k-mers are never used as seeds, so poly-A/T tails
+don't create giant buckets.
 
 ## Algorithm
 
@@ -62,13 +60,15 @@ cluster greedily, and resolve the best exemplar at finalize.
 1. **Seeds.** Illumina takes minimizers from adjacent windows at the start of
    each mate. ONT treats the read's two ends like two mates. It takes one
    minimizer from each of `num_windows` adjacent windows of `window_len`
-   bases, counted inward from both the start and the end of the interval.
+   bases, counted inward from both the start and the end of the read.
    - K-mers are canonical, so each read and its reverse complement give the
      same seeds.
    - Minimizers are chosen by a mixing hash, not the lexicographic 2-bit
      value, so poly-A k-mers aren't systematically preferred.
 2. **Buckets.** As in the Illumina path, each seed is a bucket key: a
-   leader is posted under each of its 16 end seeds, with the end it came
+   leader is posted under each of its end seeds (up to 16 with the
+   defaults; fewer for short reads or reads with non-ACGT or homopolymer
+   runs; none if either end has no seed, which leaves it a singleton), with the end it came
    from and its distance from that end. Unlike Illumina, a candidate needs
    evidence at *both* ends. A read's start seeds must hit one end of the
    leader and its end seeds the other, in a consistent orientation (start
@@ -88,19 +88,27 @@ cluster greedily, and resolve the best exemplar at finalize.
      groups, where inner seeds can have very large compatible ranges.
 3. **Comparison.** Candidates go through a staged check:
    - **Orientation.** Same strand, or reverse complement when allowed.
-   - **Endpoint check.** At each end, the first bases inward from the
-     boundary are aligned with the outer boundary anchored. The boundaries
-     may be displaced by at most `max_end_offset`, and the inner end of the
-     aligned window is free. That window gets its own small error allowance,
-     so an indel near an end is tolerated but a different fragment endpoint
-     is not.
-   - **Whole-read check.** A bounded, banded edit distance over the whole
-     interval. A pair whose alignment cannot fit in the band is rejected.
-     The band is sized from the error budget.
+   - **Length check.** The length difference can't exceed the whole-read
+     edit budget.
+   - **Endpoint check.** At each end, the first `end_check_len` bases
+     inward from the boundary are aligned with the outer boundary anchored
+     and the inner end free. Up to `max_end_offset` bases of displacement
+     are free, and at most `max_end_errors` edits are allowed. Edit distance
+     alone can't tell a displaced endpoint from indels at the boundary, so
+     each end is aligned twice: once with displacement limited to
+     `max_end_offset`, and once allowing more. If the second alignment is
+     strictly cheaper, the endpoints differ and the pair is rejected. This
+     keeps the error allowance from silently widening the endpoint
+     tolerance. Low-complexity ends are inherently ambiguous under this
+     rule.
+   - **Whole-read check.** Edit distance over the whole read, bounded by
+     `max_error_frac` of the longer read, computed with a diagonal-transition
+     algorithm (the `editdistancek` crate) whose cost grows with the actual
+     distance.
 4. **Clustering.** As in the Illumina path:
    - The first read of a cluster becomes its immutable comparison leader.
    - Later reads join the first leader they match, and clusters never merge.
-   - The best-scoring read (quality on the normalized interval) becomes the
+   - The best-scoring read (mean quality, then length) becomes the
      exemplar at finalize.
 
    Members are verified against the leader, not necessarily against the
@@ -114,15 +122,18 @@ cluster greedily, and resolve the best exemplar at finalize.
   the whole leader only if its ends match.
 - **Assignments.** One `u32` assignment per read.
 - **Seed index.** A hash map from seed to an offset-sorted list of 8-byte
-  postings (leader id, offset, end), 16 postings per leader. Most seeds
+  postings (leader id, offset, end), up to 16 postings per leader. Most seeds
   belong to one leader, so a bucket holds one posting inline. Insertion
   keeps each bucket sorted, so it is linear in the bucket's size, which
   only matters for seeds shared by very many leaders.
-- **Measured footprint.** At ~2.5 kb reads, about 0.9 KB per leader when
-  leaders share seeds, rising to about 1.4 KB when every seed is distinct.
-  At tens of millions of reads, seeds are necessarily shared: the total
-  distinct genome sequence present is far smaller than the bases sequenced.
-  So the 64 GB target holds even if nearly all of 50M reads are unique.
+- **Measured footprint.** In synthetic tests with reads of 0.5-4.5 kb
+  (mean ~2.5 kb), peak memory was about 0.9 KB per leader when leaders
+  share seeds and about 1.4 KB when every seed is distinct. Packed sequence
+  accounts for a quarter byte per base, so longer reads cost
+  proportionally more. With tens of millions of reads, the distinct genome
+  sequence present is usually far smaller than the bases sequenced, so
+  seeds are shared. At that read length, even 50M unique reads then fit
+  in 64 GB.
   `examples/ont_scale.rs` streams synthetic reads to measure throughput and
   peak memory at that scale.
 
@@ -132,10 +143,31 @@ cluster greedily, and resolve the best exemplar at finalize.
   dense coverage and nearby-but-distinct endpoints. Molecules form PCR
   families of various sizes, and each read gets independent substitution,
   insertion and deletion errors, with optional foldback tails, homopolymer
-  tails and reverse complements. All error parameters are supplied at runtime,
-  with defaults from published literature.
-- **Metrics.** Seed-retrieval recall, comparator recall and precision, and
-  duplicate-count bias are measured separately, alongside run time and peak
-  memory.
-- **Scale test.** The simulator generates a synthetic input at the target
-  scale.
+  tails and reverse complements. All error rates are supplied at runtime;
+  nothing in the code encodes a particular instrument's error profile.
+- **Metrics.** The evaluator reports pair-level precision and recall
+  (against both molecule truth and endpoint-identifiability truth), merges,
+  splits, duplicate-count bias, and recall by strand and foldback status.
+  `ont_eval` adds run time and work counters. Seed retrieval and the
+  comparator were also measured separately during development, with a
+  local diagnostic.
+- **Scale test.** `examples/ont_scale.rs` streams synthetic reads, never
+  storing them, to measure throughput and peak memory at tens of millions
+  of reads.
+- **Real data.** Parameters were also checked locally against real data,
+  using reads with identical aligned endpoints as a stand-in for truth.
+  That data is not part of this repository.
+
+## Limitations
+
+- **Saturated groups.** When very many reads cover a short genome,
+  independent molecules often share endpoints within the tolerance, so
+  counts in such groups are approximate in both directions. These groups
+  are also slower per read: each seed matches many leaders. In a synthetic
+  test with millions of reads on one 7 kb genome, cost grew from about 60
+  to 130 µs per read as reads went from 1M to 8M.
+- **Accuracy regime.** The defaults are a design assumption: reads of
+  roughly 1% per-read error, typical of current high-accuracy ONT
+  basecalling. Noisier reads need larger `max_error_frac` and `max_end_errors`.
+- **Truncated copies.** Copies that share only one endpoint are not merged.
+- **Foldbacks** are not trimmed (see "Read ends").

@@ -43,6 +43,10 @@ Good performance > readability > great performance > clever code.
   on by default). With non-directional preps, PCR copies of one molecule can
   be sequenced from either strand. Directional preps can turn it off so that
   only same-orientation matches count.
+- **Foldbacks are not trimmed** (see the design doc's "Read ends"). A
+  virtual-trimming detector was built and evaluated, and is archived outside
+  the repo. Revisit only for libraries where foldbacks arise independently
+  in each read.
 - **Stay close to the Illumina design** where it doesn't compromise the
   goals above: bucket reads (with an ONT-appropriate bucketing strategy),
   compare within buckets, greedy streaming clustering, and resolve exemplars
