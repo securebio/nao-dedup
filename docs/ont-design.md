@@ -50,7 +50,8 @@ Instead, each read gets a *virtual* biological interval. Conservatively
 detected foldback tails are excluded from it. Seeding, comparison, and
 quality scoring all use this interval, but output keeps the original record
 unchanged. If detection is uncertain, the read is left untrimmed. Homopolymer
-tails are not trimmed; low-complexity k-mers are simply not used as seeds.
+tails are not trimmed; single-base homopolymer k-mers are simply not used as
+seeds.
 
 ## Algorithm
 

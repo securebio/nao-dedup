@@ -57,6 +57,9 @@ impl OntMinimizerParams {
     }
 }
 
+/// Defaults chosen by sweeps on simulated reads of roughly 1% per-read
+/// error. Smaller windows give more minimizers per end, which raised
+/// retrieval recall more than larger k-mers or fewer, larger windows.
 impl Default for OntMinimizerParams {
     fn default() -> Self {
         Self {
@@ -364,20 +367,27 @@ mod tests {
 
     #[test]
     fn duplicates_with_errors_share_a_pair_key() {
-        // A substitution in one window changes at most that window's
-        // minimizer, so other start/end pairs still match.
+        // Substitutions and indels near both ends, in either orientation:
+        // some pair key survives, with offsets within the indel size.
         let mut rng = StdRng::seed_from_u64(4);
         let params = OntMinimizerParams::default();
         let seq = random_seq(1500, &mut rng);
-        let mut mutated = seq.clone();
-        for pos in [10, 1490] {
-            mutated[pos] = if seq[pos] == b'A' { b'C' } else { b'A' };
+        let mut read = seq.clone();
+        read[10] = if seq[10] == b'A' { b'C' } else { b'A' };
+        read.insert(70, b'G'); // shifts later start seeds by one
+        read.remove(1400); // shifts end seeds inward of it by one
+        let original = seeds(&seq, &params).pair_keys();
+        for other in [read.clone(), reverse_complement(&read)] {
+            let keys = seeds(&other, &params).pair_keys();
+            let shared: Vec<_> = original
+                .iter()
+                .filter_map(|x| keys.iter().find(|y| y.key == x.key).map(|y| (x, y)))
+                .collect();
+            assert!(!shared.is_empty());
+            assert!(shared.iter().any(|(x, y)| {
+                x.offsets.0.abs_diff(y.offsets.0) <= 1 && x.offsets.1.abs_diff(y.offsets.1) <= 1
+            }));
         }
-        let (a, b) = (
-            seeds(&seq, &params).pair_keys(),
-            seeds(&mutated, &params).pair_keys(),
-        );
-        assert!(a.iter().any(|x| b.iter().any(|y| x.key == y.key)));
     }
 
     /// Independent per-k-mer reference for `kmer_hashes`.

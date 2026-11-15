@@ -8,11 +8,12 @@
 //!
 //! 1. **Endpoints.** At each end, the first `end_check_len` bases are aligned
 //!    with the outer boundary anchored. Endpoint displacement up to
-//!    `max_end_offset` is free, and further displacement costs one edit per
-//!    base. The inner end of the window is free, so an indel inside the
-//!    window doesn't push the alignment off its end. At most `max_end_errors`
-//!    edits are allowed. An indel near an end is tolerated, but a different
-//!    fragment endpoint is not.
+//!    `max_end_offset` is free. The inner end of the window is free, so an
+//!    indel inside the window doesn't push the alignment off its end. At most
+//!    `max_end_errors` edits are allowed, and a strictly cheaper alignment at
+//!    a larger displacement rejects the pair (see `end_window_matches`). An
+//!    indel near an end is tolerated, but a different fragment endpoint is
+//!    not.
 //! 2. **Whole read.** The edit distance between the reads must be at most
 //!    `max_error_frac` of the longer read.
 //!
@@ -22,6 +23,12 @@
 use smallvec::SmallVec;
 
 /// Parameters for ONT duplicate matching.
+///
+/// The defaults suit reads of roughly 1% per-read error (typical of current
+/// ONT chemistry and high-accuracy basecalling): two such reads differ by
+/// about 2%, comfortably inside `max_error_frac`. They were chosen by sweeps
+/// on simulated reads. Noisier reads need a larger `max_error_frac` and
+/// `max_end_errors`; otherwise true duplicates are silently kept as unique.
 #[derive(Debug, Clone)]
 pub struct OntDedupParams {
     /// Endpoint displacement (bases) allowed at each end at no cost.
@@ -39,7 +46,7 @@ pub struct OntDedupParams {
 impl Default for OntDedupParams {
     fn default() -> Self {
         Self {
-            max_end_offset: 3,
+            max_end_offset: 2,
             end_check_len: 64,
             max_end_errors: 5,
             max_error_frac: 0.04,
@@ -56,7 +63,7 @@ pub(crate) fn is_duplicate(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool 
     // can reject before any alignment.
     a.len().abs_diff(b.len()) <= budget
         && ends_match(a, b, params)
-        && editdistancek::edit_distance_bounded(a, b, budget).is_some()
+        && whole_read_matches(a, b, params)
 }
 
 fn whole_read_budget(a: &[u8], b: &[u8], params: &OntDedupParams) -> usize {
@@ -66,9 +73,9 @@ fn whole_read_budget(a: &[u8], b: &[u8], params: &OntDedupParams) -> usize {
     ((params.max_error_frac * longer as f64).floor() as usize).min(longer)
 }
 
-pub(crate) fn ends_match(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
+fn ends_match(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
     let n = params.end_check_len;
-    if !end_matches(&a[..n.min(a.len())], &b[..n.min(b.len())], params) {
+    if !end_window_matches(&a[..n.min(a.len())], &b[..n.min(b.len())], params) {
         return false;
     }
     // Align the 3' ends from the boundary inward too.
@@ -79,7 +86,7 @@ pub(crate) fn ends_match(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
             .copied()
             .collect()
     };
-    end_matches(&reversed_tail(a), &reversed_tail(b), params)
+    end_window_matches(&reversed_tail(a), &reversed_tail(b), params)
 }
 
 /// Whether two end windows, read from the boundary inward, agree.
@@ -97,7 +104,7 @@ pub(crate) fn ends_match(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
 /// ambiguous: shifting along a repeat can change which alignment is
 /// cheapest, so such ends may be rejected despite matching, or accepted
 /// despite a displacement within the repeat.
-fn end_matches(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
+fn end_window_matches(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
     let (m, max_errors) = (params.max_end_offset, params.max_end_errors);
     let Some(within) = anchored_end_cost(a, b, m, max_errors as u32) else {
         return false;
@@ -178,8 +185,7 @@ fn anchored_end_cost(a: &[u8], b: &[u8], free_skip: usize, max_cost: u32) -> Opt
     result(best.min(last_row))
 }
 
-#[cfg(test)]
-pub(crate) fn whole_read_matches(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
+fn whole_read_matches(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
     editdistancek::edit_distance_bounded(a, b, whole_read_budget(a, b, params)).is_some()
 }
 
@@ -283,6 +289,30 @@ mod tests {
         substitute(&mut read, 500);
         assert!(is_duplicate(&read, &seq, &params(0, 3)));
         assert!(is_duplicate(&seq, &read, &params(0, 3)));
+    }
+
+    #[test]
+    fn errors_at_the_boundary_are_tolerated_with_defaults() {
+        // Errors within the first max_end_offset + max_end_errors bases are
+        // where the within/wider comparison could misfire.
+        let mut rng = StdRng::seed_from_u64(12);
+        let seq = random_seq(1500, &mut rng);
+        let defaults = OntDedupParams::default();
+        let edits: [&dyn Fn(&mut Vec<u8>); 4] = [
+            &|r| substitute(r, 0),
+            &|r| substitute(r, 2),
+            &|r| r.insert(1, b'T'),
+            &|r| {
+                r.remove(3);
+                substitute(r, 6);
+            },
+        ];
+        for edit in edits {
+            let mut read = seq.clone();
+            edit(&mut read);
+            assert!(is_duplicate(&read, &seq, &defaults));
+            assert!(is_duplicate(&seq, &read, &defaults));
+        }
     }
 
     #[test]
