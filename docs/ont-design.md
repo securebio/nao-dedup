@@ -72,7 +72,13 @@ cluster greedily, and resolve the best exemplar at finalize.
    stored unordered, because reverse complementing a read swaps its ends.
    This differs from Illumina, where each single minimizer is a bucket.
    Candidates need evidence at both ends, which keeps buckets small at
-   endpoint hotspots. Whether a rescue path using single-end seeds is
+   endpoint hotspots.
+   Each posting also records how far its two seeds are from their read
+   ends. A leader whose seed offsets differ from the read's by more than the
+   endpoint allowance (plus indel drift proportional to the distance from
+   the end) can't pass the endpoint check, so it is skipped without
+   aligning. For non-repetitive sequence this is exact within the end-check
+   window; further in, and in repeats, it is a heuristic. Whether a rescue path using single-end seeds is
    needed will be decided by measured recall.
 3. **Comparison.** Candidates go through a staged check:
    - **Orientation.** Same strand, or reverse complement when allowed.

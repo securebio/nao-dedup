@@ -28,6 +28,9 @@ struct Args {
     window_len: usize,
     #[arg(long, default_value_t = OntMinimizerParams::default().num_windows)]
     num_windows: usize,
+    /// Only match reads in the same orientation.
+    #[arg(long)]
+    no_rc: bool,
     /// Print metrics as one JSON object instead of text.
     #[arg(long)]
     json: bool,
@@ -41,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         end_check_len: args.end_check_len,
         max_end_errors: args.max_end_errors,
         max_error_frac: args.max_error_frac,
-        rc_tolerant: true,
+        rc_tolerant: !args.no_rc,
     };
     let minimizer_params =
         OntMinimizerParams::new(args.kmer_len, args.window_len, args.num_windows)?;

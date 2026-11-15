@@ -27,8 +27,26 @@ struct Cluster {
     best_score: Score,
 }
 
-/// Exemplar ranking, as in the Illumina path: mean Phred quality first,
-/// then length. Compared lexicographically.
+/// Whether a seed at `a` bases from its read end in one read and `b` bases
+/// in another could belong to duplicates. Between duplicates a seed's offset
+/// differs by the endpoint displacement plus the net indels between the seed
+/// and the read end. Within `end_check_len` of the end, and assuming the
+/// shared seed is the same (homologous) k-mer in both reads, this bound is
+/// exact: the endpoint check allows at most `max_end_offset` +
+/// `max_end_errors`. In repetitive sequence a shared seed may be a different
+/// copy of the k-mer, and the filter can then skip a duplicate.
+/// Further in, indels beyond the end window are only bounded by the
+/// whole-read error rate, so the allowance grows with distance; this part is
+/// a heuristic, not a guarantee, and a rare dense indel cluster could hide a
+/// duplicate.
+fn offsets_compatible(a: u16, b: u16, params: &OntDedupParams) -> bool {
+    let drift = (params.max_error_frac * f64::from(a.max(b))).ceil() as usize;
+    usize::from(a.abs_diff(b)) <= params.max_end_offset + params.max_end_errors + drift
+}
+
+/// Exemplar ranking: mean Phred quality first, then length, compared
+/// lexicographically. The arithmetic mean of Phred scores deliberately
+/// matches the Illumina path (issue #6 discusses better quality summaries).
 type Score = (f64, usize);
 
 fn score(seq: &[u8], qual: &[u8]) -> Score {
@@ -57,6 +75,9 @@ pub struct OntDedupStats {
     pub candidates_compared: usize,
 }
 
+/// Streaming deduplicator for single-end ONT reads; see the module docs and
+/// `docs/ont-design.md`. Feed reads with `process_read_by_index`, call
+/// `finalize`, then query exemplars.
 pub struct OntDedupContext {
     dedup_params: OntDedupParams,
     minimizer_params: OntMinimizerParams,
@@ -109,8 +130,9 @@ impl OntDedupContext {
     }
 
     /// Process one read. `idx` must be the read's position in the input:
-    /// indices start at 0, each is used once, and they should be contiguous
-    /// (sparse indices work but waste memory). Quality is Phred+33.
+    /// indices start at 0, each is used once, and they should be contiguous.
+    /// (As in the Illumina path, an index that is skipped is still counted by
+    /// `stats` and reports cluster 0's exemplar.) Quality is Phred+33.
     ///
     /// Returns the cluster id the read was assigned to.
     pub fn process_read_by_index(&mut self, idx: usize, seq: &[u8], qual: &[u8]) -> u32 {
@@ -173,16 +195,7 @@ impl OntDedupContext {
     fn find_matching_cluster(&mut self, read: &[u8], keys: &[PairKey]) -> Option<u32> {
         let mut checked = std::mem::take(&mut self.checked);
         checked.clear();
-        // A seed's offset differs between duplicates by the endpoint
-        // displacement plus net indels between the seed and the read end.
-        // Leaders further off than the endpoint allowance plus the whole-read
-        // error rate over that distance are skipped without aligning.
         let params = &self.dedup_params;
-        let base_shift = params.max_end_offset + params.max_end_errors;
-        let near = |a: u16, b: u16| {
-            let drift = (params.max_error_frac * f64::from(a.max(b))).ceil() as usize;
-            usize::from(a.abs_diff(b)) <= base_shift + drift
-        };
         let mut rc_ready = false;
         let mut matched = None;
         'search: for key in keys {
@@ -190,8 +203,8 @@ impl OntDedupContext {
                 continue;
             };
             for posting in bucket {
-                if !near(posting.offsets.0, key.offsets.0)
-                    || !near(posting.offsets.1, key.offsets.1)
+                if !offsets_compatible(posting.offsets.0, key.offsets.0, params)
+                    || !offsets_compatible(posting.offsets.1, key.offsets.1, params)
                     || !checked.insert(posting.cluster)
                 {
                     continue;
@@ -229,7 +242,6 @@ impl OntDedupContext {
             *result = self.clusters[*result as usize].best_read_idx;
         }
         self.finalized = true;
-        self.stats.clusters = self.clusters.len();
         self.buckets = FxHashMap::default();
         self.leader_bases = Vec::new();
         self.leader_starts = Vec::new();
@@ -268,5 +280,28 @@ impl OntDedupContext {
             "get_exemplar_index must be called after finalize()"
         );
         self.results[read_idx] as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offset_allowance_grows_with_distance_from_the_end() {
+        let params = OntDedupParams {
+            max_end_offset: 2,
+            max_end_errors: 5,
+            max_error_frac: 0.04,
+            ..Default::default()
+        };
+        // Near the end: endpoint allowance only (2 + 5 + ceil(0.04 * 10)).
+        assert!(offsets_compatible(10, 2, &params));
+        assert!(!offsets_compatible(10, 1, &params));
+        // 250 bases in: plus ceil(0.04 * 250) = 10 bases of indel drift.
+        assert!(offsets_compatible(250, 233, &params));
+        assert!(!offsets_compatible(250, 232, &params));
+        // Symmetric.
+        assert!(offsets_compatible(233, 250, &params));
     }
 }

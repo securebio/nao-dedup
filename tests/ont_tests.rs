@@ -140,6 +140,25 @@ fn indel_inside_seeded_region_does_not_hide_duplicate() {
 }
 
 #[test]
+fn displaced_leaders_are_skipped_without_aligning() {
+    // Thirty distinct molecules, each shifted 12 bases along the genome
+    // from the previous one. They share seeds, but at offsets too far apart
+    // for duplicates, so the offset filter should skip nearly all of them.
+    let mut rng = StdRng::seed_from_u64(9);
+    let genome = random_seq(3000, &mut rng);
+    let mut ctx = OntDedupContext::new(OntDedupParams::default(), OntMinimizerParams::default());
+    for j in 0..30 {
+        let start = 100 + 12 * j;
+        ctx.process_read_by_index(j, &genome[start..start + 2000], &qual(2000, 20));
+    }
+    ctx.finalize();
+    assert_eq!(ctx.stats(), (30, 30));
+    let compared = ctx.detailed_stats().candidates_compared;
+    // Without the filter this is over 200.
+    assert!(compared < 30, "{compared} candidates compared");
+}
+
+#[test]
 fn quality_outranks_length() {
     // The longer read has slightly lower mean quality, so it loses even
     // though it is 100 bases longer.
