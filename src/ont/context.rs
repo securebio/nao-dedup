@@ -7,7 +7,10 @@
 //! fixed sequence, and clusters never merge. The best read of each cluster
 //! (by quality, then length) is tracked and resolved in `finalize()`.
 
-use super::compare::{OntDedupParams, is_duplicate};
+use super::compare::{
+    OntDedupParams, end_windows, ends_match, lengths_compatible, whole_read_matches,
+};
+use super::leaders::LeaderStore;
 use super::reverse_complement_into;
 use super::seeds::{EndSeeds, OntMinimizerParams, end_seeds};
 use ahash::AHashSet;
@@ -56,6 +59,38 @@ struct Cluster {
 fn offsets_compatible(a: u16, b: u16, params: &OntDedupParams) -> bool {
     let drift = (params.max_error_frac * f64::from(a.max(b))).ceil() as usize;
     usize::from(a.abs_diff(b)) <= params.max_end_offset + params.max_end_errors + drift
+}
+
+/// Buffers for unpacking a leader during comparison.
+#[derive(Default)]
+struct LeaderScratch {
+    start: Vec<u8>,
+    end: Vec<u8>,
+    full: Vec<u8>,
+}
+
+/// `is_duplicate(read, leader)` for a packed leader, unpacking only what
+/// each stage needs: the end windows first, the whole leader only if the
+/// ends match.
+fn matches_leader(
+    read: &[u8],
+    leaders: &LeaderStore,
+    id: u32,
+    scratch: &mut LeaderScratch,
+    params: &OntDedupParams,
+) -> bool {
+    let len = leaders.len(id);
+    if !lengths_compatible(read.len(), len, params) {
+        return false;
+    }
+    let (start, end) = end_windows(len, params);
+    leaders.unpack_into(id, start, &mut scratch.start);
+    leaders.unpack_into(id, end, &mut scratch.end);
+    if !ends_match(read, &scratch.start, &scratch.end, params) {
+        return false;
+    }
+    leaders.unpack_into(id, 0..len, &mut scratch.full);
+    whole_read_matches(read, &scratch.full, params)
 }
 
 /// Bounds `(lo, hi)` containing every offset compatible with `a` under
@@ -122,10 +157,8 @@ pub struct OntDedupContext {
     /// (then insertion order) so a lookup can visit just the compatible
     /// offset range. Dense groups make some buckets very large.
     buckets: FxHashMap<u64, Vec<Posting>>,
-    /// Leader sequences, concatenated; leader `c` is
-    /// `leader_bases[leader_starts[c]..leader_starts[c + 1]]`.
-    leader_bases: Vec<u8>,
-    leader_starts: Vec<usize>,
+    /// Leader sequences, indexed by cluster id.
+    leaders: LeaderStore,
 
     /// Indexed by cluster id (the order clusters were created).
     clusters: Vec<Cluster>,
@@ -140,6 +173,7 @@ pub struct OntDedupContext {
     hash_scratch: Vec<u64>,
     read_scratch: Vec<u8>,
     rc_scratch: Vec<u8>,
+    leader_scratch: LeaderScratch,
     /// Candidate leader -> evidence bits, and leaders ready to align.
     evidence: FxHashMap<u32, u8>,
     candidates: Vec<u32>,
@@ -156,8 +190,7 @@ impl OntDedupContext {
             dedup_params,
             minimizer_params,
             buckets: FxHashMap::default(),
-            leader_bases: Vec::new(),
-            leader_starts: vec![0],
+            leaders: LeaderStore::default(),
             clusters: Vec::new(),
             results: Vec::new(),
             stats: OntDedupStats::default(),
@@ -165,6 +198,7 @@ impl OntDedupContext {
             hash_scratch: Vec::new(),
             read_scratch: Vec::new(),
             rc_scratch: Vec::new(),
+            leader_scratch: LeaderScratch::default(),
             evidence: FxHashMap::default(),
             candidates: Vec::new(),
         }
@@ -211,8 +245,7 @@ impl OntDedupContext {
                     best_read_idx: read_idx,
                     best_score: score,
                 });
-                self.leader_bases.extend_from_slice(&read);
-                self.leader_starts.push(self.leader_bases.len());
+                self.leaders.push(&read);
                 // A leader needs seeds at both ends to ever be found.
                 if !seeds.start.is_empty() && !seeds.end.is_empty() {
                     for (at_end, end) in [(false, &seeds.start), (true, &seeds.end)] {
@@ -308,9 +341,8 @@ impl OntDedupContext {
                     continue;
                 }
                 self.stats.candidates_compared += 1;
-                let c = cluster as usize;
-                let leader = &self.leader_bases[self.leader_starts[c]..self.leader_starts[c + 1]];
-                if same && is_duplicate(read, leader, params) {
+                let scratch = &mut self.leader_scratch;
+                if same && matches_leader(read, &self.leaders, cluster, scratch, params) {
                     return Some(cluster);
                 }
                 if opposite {
@@ -319,7 +351,7 @@ impl OntDedupContext {
                         reverse_complement_into(read, &mut self.rc_scratch);
                         rc_ready = true;
                     }
-                    if is_duplicate(&self.rc_scratch, leader, params) {
+                    if matches_leader(&self.rc_scratch, &self.leaders, cluster, scratch, params) {
                         return Some(cluster);
                     }
                 }
@@ -339,8 +371,7 @@ impl OntDedupContext {
         }
         self.finalized = true;
         self.buckets = FxHashMap::default();
-        self.leader_bases = Vec::new();
-        self.leader_starts = Vec::new();
+        self.leaders = LeaderStore::default();
     }
 
     /// (total reads, clusters), as in the Illumina `DedupContext::stats`.

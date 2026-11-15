@@ -21,6 +21,7 @@
 //! non-duplicates.
 
 use smallvec::SmallVec;
+use std::ops::Range;
 
 /// Parameters for ONT duplicate matching.
 ///
@@ -57,36 +58,50 @@ impl Default for OntDedupParams {
 
 /// Whether `a` and `b`, in the same orientation, are duplicates. Comparison
 /// is case-sensitive; callers pass uppercase sequences.
+#[cfg(test)]
 pub(crate) fn is_duplicate(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
-    let budget = whole_read_budget(a, b, params);
-    // Edit distance is at least the length difference, so this cheap check
-    // can reject before any alignment.
-    a.len().abs_diff(b.len()) <= budget
-        && ends_match(a, b, params)
+    let (b_start, b_end) = end_windows(b.len(), params);
+    lengths_compatible(a.len(), b.len(), params)
+        && ends_match(a, &b[b_start], &b[b_end], params)
         && whole_read_matches(a, b, params)
 }
 
-fn whole_read_budget(a: &[u8], b: &[u8], params: &OntDedupParams) -> usize {
-    let longer = a.len().max(b.len());
-    // Edit distance never exceeds the longer length, so cap there (this also
-    // keeps out-of-range fractions from overflowing).
-    ((params.max_error_frac * longer as f64).floor() as usize).min(longer)
+// The stages of `is_duplicate`, in order, for callers that store `b` packed
+// and want to unpack only what each stage needs.
+
+/// Edit distance is at least the length difference, so this cheap check can
+/// reject before any alignment.
+pub(crate) fn lengths_compatible(a_len: usize, b_len: usize, params: &OntDedupParams) -> bool {
+    a_len.abs_diff(b_len) <= whole_read_budget(a_len, b_len, params)
 }
 
-fn ends_match(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
-    let n = params.end_check_len;
-    if !end_window_matches(&a[..n.min(a.len())], &b[..n.min(b.len())], params) {
+/// Ranges of the start and end windows of a sequence of length `len`.
+pub(crate) fn end_windows(len: usize, params: &OntDedupParams) -> (Range<usize>, Range<usize>) {
+    let n = params.end_check_len.min(len);
+    (0..n, len - n..len)
+}
+
+/// Whether `a`'s ends match `b`'s, given `b`'s `end_windows`.
+pub(crate) fn ends_match(a: &[u8], b_start: &[u8], b_end: &[u8], params: &OntDedupParams) -> bool {
+    let (a_start, a_end) = end_windows(a.len(), params);
+    if !end_window_matches(&a[a_start], b_start, params) {
         return false;
     }
     // Align the 3' ends from the boundary inward too.
-    let reversed_tail = |s: &[u8]| -> SmallVec<[u8; 256]> {
-        s[s.len() - n.min(s.len())..]
-            .iter()
-            .rev()
-            .copied()
-            .collect()
-    };
-    end_window_matches(&reversed_tail(a), &reversed_tail(b), params)
+    let reversed = |s: &[u8]| -> SmallVec<[u8; 256]> { s.iter().rev().copied().collect() };
+    end_window_matches(&reversed(&a[a_end]), &reversed(b_end), params)
+}
+
+pub(crate) fn whole_read_matches(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
+    editdistancek::edit_distance_bounded(a, b, whole_read_budget(a.len(), b.len(), params))
+        .is_some()
+}
+
+fn whole_read_budget(a_len: usize, b_len: usize, params: &OntDedupParams) -> usize {
+    let longer = a_len.max(b_len);
+    // Edit distance never exceeds the longer length, so cap there (this also
+    // keeps out-of-range fractions from overflowing).
+    ((params.max_error_frac * longer as f64).floor() as usize).min(longer)
 }
 
 /// Whether two end windows, read from the boundary inward, agree.
@@ -185,10 +200,6 @@ fn anchored_end_cost(a: &[u8], b: &[u8], free_skip: usize, max_cost: u32) -> Opt
     result(best.min(last_row))
 }
 
-fn whole_read_matches(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
-    editdistancek::edit_distance_bounded(a, b, whole_read_budget(a, b, params)).is_some()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +220,11 @@ mod tests {
         }
     }
 
+    fn ends_match_full(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
+        let (start, end) = end_windows(b.len(), params);
+        ends_match(a, &b[start], &b[end], params)
+    }
+
     fn substitute(seq: &mut [u8], pos: usize) {
         seq[pos] = if seq[pos] == b'A' { b'C' } else { b'A' };
     }
@@ -226,10 +242,10 @@ mod tests {
         let seq = random_seq(500, &mut rng);
         // Shift the start by 3 and the end by 2 in each direction.
         for (a, b) in [(&seq[3..498], &seq[..]), (&seq[..], &seq[3..498])] {
-            assert!(ends_match(a, b, &params(3, 0)));
-            assert!(!ends_match(a, b, &params(2, 0)));
+            assert!(ends_match_full(a, b, &params(3, 0)));
+            assert!(!ends_match_full(a, b, &params(2, 0)));
             // The error allowance doesn't widen the endpoint tolerance.
-            assert!(!ends_match(a, b, &params(2, 5)));
+            assert!(!ends_match_full(a, b, &params(2, 5)));
         }
     }
 
@@ -260,8 +276,8 @@ mod tests {
                 (trimmed_end, &seq[..]),
                 (&seq[..], trimmed_end),
             ] {
-                assert!(!ends_match(a, b, &params(3, 6)), "d={d}");
-                assert!(ends_match(a, b, &params(d, 0)), "d={d}");
+                assert!(!ends_match_full(a, b, &params(3, 6)), "d={d}");
+                assert!(ends_match_full(a, b, &params(d, 0)), "d={d}");
             }
         }
     }
@@ -275,7 +291,7 @@ mod tests {
         seq.extend(random_seq(1000, &mut rng));
         let mut truncated = seq[8..].to_vec();
         truncated[0] = b'C';
-        assert!(!ends_match(&truncated, &seq, &params(3, 5)));
+        assert!(!ends_match_full(&truncated, &seq, &params(3, 5)));
     }
 
     #[test]
@@ -323,8 +339,8 @@ mod tests {
         for pos in [5, 15, 25, 35] {
             substitute(&mut read, pos);
         }
-        assert!(!ends_match(&read, &seq, &params(3, 3)));
-        assert!(ends_match(&read, &seq, &params(3, 4)));
+        assert!(!ends_match_full(&read, &seq, &params(3, 3)));
+        assert!(ends_match_full(&read, &seq, &params(3, 4)));
     }
 
     #[test]
@@ -336,7 +352,7 @@ mod tests {
         for pos in (200..800).step_by(10) {
             substitute(&mut read, pos);
         }
-        assert!(ends_match(&read, &seq, &params(0, 0)));
+        assert!(ends_match_full(&read, &seq, &params(0, 0)));
         assert!(!is_duplicate(&read, &seq, &params(0, 0)));
         let loose = OntDedupParams {
             max_error_frac: 0.06,
@@ -349,8 +365,8 @@ mod tests {
     fn short_reads_use_whole_read_as_end_window() {
         let mut rng = StdRng::seed_from_u64(7);
         let seq = random_seq(40, &mut rng);
-        assert!(ends_match(&seq, &seq, &params(0, 0)));
-        assert!(!ends_match(&seq[5..], &seq, &params(2, 0)));
+        assert!(ends_match_full(&seq, &seq, &params(0, 0)));
+        assert!(!ends_match_full(&seq[5..], &seq, &params(2, 0)));
         assert!(!is_duplicate(&seq, b"", &params(3, 6)));
     }
 

@@ -5,6 +5,7 @@
 
 mod compare;
 mod context;
+mod leaders;
 mod seeds;
 
 pub use compare::OntDedupParams;
