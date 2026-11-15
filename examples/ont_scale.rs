@@ -8,7 +8,10 @@
 //! Error rates are required and illustrative. Molecules are drawn uniformly
 //! over the genomes, each family gets a geometric number of reads, and reads
 //! arrive in random order. Errors are placed by geometric skipping, so
-//! generation is cheap relative to deduplication.
+//! generation is cheap relative to deduplication. The rates are per-event
+//! probabilities at each step through the template; an insertion doesn't
+//! advance the template, so insertions per template base come out slightly
+//! higher than `--ins-rate` (rate / (1 - rate)).
 
 use clap::Parser;
 use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams};
@@ -98,8 +101,31 @@ fn reverse_complement_in_place(seq: &mut [u8]) {
     }
 }
 
+fn validate(args: &Args) -> Result<(), String> {
+    let rates = [args.sub_rate, args.ins_rate, args.del_rate];
+    if rates.iter().any(|r| !r.is_finite() || *r < 0.0) || rates.iter().sum::<f64>() >= 1.0 {
+        return Err("error rates must be finite, nonnegative, and sum to less than 1".into());
+    }
+    if !(args.family_mean >= 1.0 && args.family_mean.is_finite()) {
+        return Err("--family-mean must be at least 1".into());
+    }
+    if args.reads == 0 || args.genomes == 0 || args.len_min == 0 || args.len_min > args.len_max {
+        return Err(
+            "--reads and --genomes must be positive, and 0 < --len-min <= --len-max".into(),
+        );
+    }
+    if args.len_min > args.genome_len {
+        return Err("--len-min must not exceed --genome-len".into());
+    }
+    Ok(())
+}
+
 fn main() {
     let args = Args::parse();
+    if let Err(e) = validate(&args) {
+        eprintln!("Error: {e}");
+        std::process::exit(2);
+    }
     let mut rng = StdRng::seed_from_u64(args.seed);
     let genomes: Vec<Vec<u8>> = (0..args.genomes)
         .map(|_| {
@@ -130,7 +156,7 @@ fn main() {
     let setup_rss = peak_rss_mb();
 
     let mut ctx = OntDedupContext::new(OntDedupParams::default(), OntMinimizerParams::default());
-    let (mut read, qual) = (Vec::new(), vec![b'5'; 20_000]);
+    let (mut read, mut qual) = (Vec::new(), Vec::new());
     let mut dedup_time = Duration::ZERO;
     let started = Instant::now();
     for (idx, &m) in read_molecule.iter().enumerate() {
@@ -140,8 +166,9 @@ fn main() {
         if rng.gen_bool(0.5) {
             reverse_complement_in_place(&mut read);
         }
+        qual.resize(read.len(), b'5');
         let t = Instant::now();
-        ctx.process_read_by_index(idx, &read, &qual[..read.len()]);
+        ctx.process_read_by_index(idx, &read, &qual);
         dedup_time += t.elapsed();
         if (idx + 1) % 1_000_000 == 0 {
             eprintln!(

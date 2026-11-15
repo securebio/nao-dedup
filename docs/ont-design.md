@@ -112,9 +112,15 @@ cluster greedily, and resolve the best exemplar at finalize.
   the whole leader only if its ends match.
 - **Assignments.** One `u32` assignment per read.
 - **Seed index.** A hash map from seed to an offset-sorted list of 8-byte
-  postings (leader id, offset, end), 16 postings per leader.
-- **Measured footprint.** About 1.2 KB per leader at ~2.5 kb reads, so the
-  64 GB target holds even if nearly all of 50M reads are unique.
+  postings (leader id, offset, end), 16 postings per leader. Most seeds
+  belong to one leader, so a bucket holds one posting inline. Insertion
+  keeps each bucket sorted, so it is linear in the bucket's size, which
+  only matters for seeds shared by very many leaders.
+- **Measured footprint.** At ~2.5 kb reads, about 0.9 KB per leader when
+  leaders share seeds, rising to about 1.4 KB when every seed is distinct.
+  At tens of millions of reads, seeds are necessarily shared: the total
+  distinct genome sequence present is far smaller than the bases sequenced.
+  So the 64 GB target holds even if nearly all of 50M reads are unique.
   `examples/ont_scale.rs` streams synthetic reads to measure throughput and
   peak memory at that scale.
 
