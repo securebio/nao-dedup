@@ -10,7 +10,7 @@
 
 use clap::{Parser, ValueEnum};
 use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams};
-use ont_sim::add_errors;
+use ont_sim::{add_errors, reverse_complement};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 #[derive(Parser)]
@@ -57,7 +57,8 @@ struct Args {
     window_len: usize,
     #[arg(long, default_value_t = OntMinimizerParams::default().num_windows)]
     num_windows: usize,
-    /// Only match reads in the same orientation; strand draws remain independent.
+    /// Only match reads in the same orientation; both reads of a pair then
+    /// share a strand.
     #[arg(long)]
     no_rc: bool,
 }
@@ -199,6 +200,9 @@ fn trial(args: &Args, mode: Mode, divergence: f64, offset: usize, rng: &mut StdR
         },
         OntMinimizerParams::new(args.kmer_len, args.window_len, args.num_windows).unwrap(),
     );
+    // Under --no-rc both reads share one strand, so the duplicate control
+    // still measures recall; otherwise each read's strand is independent.
+    let shared_strand = rng.gen_bool(0.5);
     for (idx, template) in templates.into_iter().enumerate() {
         let (mut read, _) = add_errors(
             template,
@@ -208,17 +212,13 @@ fn trial(args: &Args, mode: Mode, divergence: f64, offset: usize, rng: &mut StdR
             args.homopolymer_indel_mult,
             rng,
         );
-        if rng.gen_bool(0.5) {
-            read.reverse();
-            for base in &mut read {
-                *base = match *base {
-                    b'A' => b'T',
-                    b'T' => b'A',
-                    b'C' => b'G',
-                    b'G' => b'C',
-                    _ => unreachable!(),
-                };
-            }
+        let rc = if args.no_rc {
+            shared_strand
+        } else {
+            rng.gen_bool(0.5)
+        };
+        if rc {
+            read = reverse_complement(&read);
         }
         // Constant quality: exemplar selection does not affect whether this pair merges.
         ctx.process_read_by_index(idx, &read, &vec![b'5'; read.len()]);
@@ -389,17 +389,16 @@ mod tests {
     }
 
     #[test]
-    fn identical_template_control_uses_full_dedup_context_and_respects_strand_flag() {
+    fn identical_template_control_merges_with_and_without_rc() {
         let mut a = args();
         let mut rng = StdRng::seed_from_u64(a.seed);
         for _ in 0..20 {
             assert!(trial(&a, Mode::Both, 0.0, 0, &mut rng));
         }
         a.no_rc = true;
-        let outcomes: HashSet<_> = (0..40)
-            .map(|_| trial(&a, Mode::One, 0.0, 0, &mut rng))
-            .collect();
-        assert_eq!(outcomes, HashSet::from([true, false]));
+        for _ in 0..20 {
+            assert!(trial(&a, Mode::One, 0.0, 0, &mut rng));
+        }
     }
 
     #[test]

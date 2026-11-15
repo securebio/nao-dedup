@@ -143,7 +143,8 @@ fn substitution(b: u8, rng: &mut StdRng) -> u8 {
         }
     }
 }
-pub(crate) fn reverse_complement(s: &[u8]) -> Vec<u8> {
+/// Reverse complement of an uppercase ACGT sequence.
+pub fn reverse_complement(s: &[u8]) -> Vec<u8> {
     s.iter()
         .rev()
         .map(|b| match b {

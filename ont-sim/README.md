@@ -112,7 +112,8 @@ deletions collapse adjacent boundaries. Mode `one` shifts one random end, and
 mode `both` shifts each end independently, with random signs. Lengths must
 exceed the largest inward shift (twice the maximum offset for mode `both`), so
 endpoints cannot cross. Sequencing errors use `add_errors`; each read then has
-an independent 50% reverse-complement probability, including with `--no-rc`.
+an independent 50% reverse-complement probability; with `--no-rc` both reads of
+a pair share one random strand, so the control still measures recall.
 
 TSV stdout reports merge counts, rates, and the upper endpoint of the two-sided
 95% Wilson score interval. Divergence=0, offset=0 is a duplicate control: its

@@ -21,6 +21,11 @@ path = "src/dedup_interleaved_fastq.rs"
 name = "dedup_ont_fastq"
 path = "src/dedup_ont_fastq.rs"
 
+# Run this example's unit tests with plain `cargo test`.
+[[example]]
+name = "ont_nearmiss"
+test = true
+
 [dependencies]
 ahash = "0.8"
 rustc-hash = "2.1"
