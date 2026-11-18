@@ -123,9 +123,10 @@ distinct molecules. Deduplication/minimizer flags match `ont_eval`.
 ### Quality-conditioned errors (opt in)
 
 Add `--quality-conditioned --error-median <P> --error-sigma <S>
---local-q-sigma <Q> --miscalibration <M> --latent-sigma <S>` to `ont_simulate`
-or `ont_eval`. All quality-model distribution inputs are required. Without this
-flag, error rates set event probabilities directly.
+--local-q-sigma <Q> --miscalibration <M> --latent-sigma <S>` to `ont_simulate`,
+`ont_eval`, or `ont_nearmiss`. All quality-model distribution inputs are required.
+Without this flag, error rates set event probabilities directly; `ont_nearmiss`
+uses constant qualities.
 
 In this mode `--sub-rate`, `--ins-rate`, and `--del-rate` are relative event
 weights, normalized to sum to one. A read's nominal probability is lognormal

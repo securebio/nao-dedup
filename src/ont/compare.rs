@@ -15,22 +15,22 @@
 //!    indel near an end is tolerated, but a different fragment endpoint is
 //!    not.
 //! 2. **Whole read.** The edit distance between the reads must be at most
-//!    `max_error_frac` of the longer read.
+//!    a quality-derived lower-tail cutoff for a protected strain divergence,
+//!    capped at `max_error_frac` of the longer read.
 //!
-//! The endpoint check runs first because it is cheap and rejects most
-//! non-duplicates.
+//! After a cheap length check against the cap, the endpoint check rejects
+//! most non-duplicates before calculating the pair budget.
 
 use smallvec::SmallVec;
 use std::ops::Range;
 
 /// Parameters for ONT duplicate matching.
 ///
-/// The defaults suit reads of roughly 1% per-read error (typical of current
-/// ONT chemistry and high-accuracy basecalling): two such reads differ by
-/// about 2%, comfortably inside `max_error_frac`. They were chosen by sweeps
-/// on simulated reads and checked against real data. Noisier reads need a
-/// larger `max_error_frac` and `max_end_errors`; otherwise true duplicates
-/// are silently kept as unique.
+/// The whole-read edit budget is set per pair (see `pair_budget`): quality
+/// scores estimate the pair's sequencing noise, and reads merge only if their
+/// distance is unlikely (< 5%) for reads of strains `protect_divergence`
+/// apart. `max_error_frac` only caps the budget. `pair_distance_cv` is a
+/// provisional allowance for extra variability.
 #[derive(Debug, Clone)]
 pub struct OntDedupParams {
     /// Endpoint displacement (bases) allowed at each end at no cost.
@@ -39,8 +39,24 @@ pub struct OntDedupParams {
     pub end_check_len: usize,
     /// Edits allowed within each endpoint check window.
     pub max_end_errors: usize,
-    /// Whole-read edit distance allowed, as a fraction of the longer read.
+    /// Upper cap on whole-read edit distance, as a fraction of the longer read.
     pub max_error_frac: f64,
+    /// Strain divergence against which to protect (0 < value <= 1).
+    pub protect_divergence: f64,
+    /// Positive multiplier on usable-quality expected errors (default 1.2).
+    /// Does not scale the assumed-rate contribution from unavailable qualities.
+    pub quality_calibration: f64,
+    /// Positive multiplier on usable-quality noise (default 1.0).
+    pub noise_scale: f64,
+    /// Additive errors per base with usable qualities (default 0.002).
+    pub quality_error_floor: f64,
+    /// Additional relative uncertainty of pair distance (finite, nonnegative).
+    pub pair_distance_cv: f64,
+    /// Seed-offset drift allowance, independent of the whole-read cutoff.
+    pub seed_drift_frac: f64,
+    /// Expected error probability for empty or exactly constant qualities.
+    /// Default 0.01, unscaled by quality calibration.
+    pub assumed_error_rate: f64,
     /// Whether a read may match the reverse complement of another.
     pub rc_tolerant: bool,
 }
@@ -51,29 +67,215 @@ impl Default for OntDedupParams {
             max_end_offset: 2,
             end_check_len: 32,
             max_end_errors: 3,
-            max_error_frac: 0.04,
+            max_error_frac: 0.12,
+            protect_divergence: 0.015,
+            quality_calibration: 1.2,
+            noise_scale: 1.0,
+            quality_error_floor: 0.002,
+            pair_distance_cv: 0.25,
+            seed_drift_frac: 0.04,
+            assumed_error_rate: 0.01,
             rc_tolerant: true,
         }
     }
 }
 
-/// Whether `a` and `b`, in the same orientation, are duplicates. Comparison
-/// is case-sensitive; callers pass uppercase sequences.
-#[cfg(test)]
-pub(crate) fn is_duplicate(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
-    let (b_start, b_end) = end_windows(b.len(), params);
-    lengths_compatible(a.len(), b.len(), params)
-        && ends_match(a, &b[b_start], &b[b_end], params)
-        && whole_read_matches(a, b, params)
+impl OntDedupParams {
+    /// Validate all statistical parameters before processing reads.
+    pub fn validate(&self) -> Result<(), String> {
+        // Multipliers are capped generously; past these, noise estimates
+        // overflow and merging would silently stop.
+        for (name, value, positive, max) in [
+            ("max_error_frac", self.max_error_frac, false, 1.0),
+            ("protect_divergence", self.protect_divergence, true, 1.0),
+            ("quality_calibration", self.quality_calibration, true, 100.0),
+            ("noise_scale", self.noise_scale, true, 100.0),
+            ("quality_error_floor", self.quality_error_floor, false, 1.0),
+            ("pair_distance_cv", self.pair_distance_cv, false, 100.0),
+            ("seed_drift_frac", self.seed_drift_frac, false, 1.0),
+            ("assumed_error_rate", self.assumed_error_rate, false, 1.0),
+        ] {
+            if !value.is_finite() || value < 0.0 || value > max || (positive && value == 0.0) {
+                let lower = if positive { "greater than" } else { "at least" };
+                return Err(format!(
+                    "{name} must be {lower} 0 and at most {max}, got {value}"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
-// The stages of `is_duplicate`, in order, for callers that store `b` packed
-// and want to unpack only what each stage needs.
+/// Whether every byte is a valid Phred+33 quality (33..=126).
+/// Empty qualities are valid and use the assumed error rate.
+pub fn validate_quality(qual: &[u8]) -> bool {
+    !qual
+        .iter()
+        .fold(false, |invalid, &q| invalid | !(33..=126).contains(&q))
+}
+
+pub(crate) struct QualitySummary {
+    pub errors: f32,
+    pub phred_sum: u64,
+}
+
+/// Summarize qualities in one pass over the read. Histogram reduction makes
+/// expected errors independent of base order, including reverse complements.
+pub(crate) fn quality_summary(len: usize, qual: &[u8]) -> QualitySummary {
+    use std::sync::OnceLock;
+    static PHRED: OnceLock<[f64; 94]> = OnceLock::new();
+    assert!(
+        qual.is_empty() || qual.len() == len,
+        "nonempty quality length must match sequence length"
+    );
+    let mut counts = [0u32; 256];
+    for &q in qual {
+        counts[usize::from(q)] += 1;
+    }
+    assert!(
+        counts[..33].iter().chain(&counts[127..]).all(|&n| n == 0),
+        "quality bytes must be valid Phred+33 (33..=126)"
+    );
+    let table = PHRED.get_or_init(|| std::array::from_fn(|q| 10_f64.powf(-(q as f64) / 10.0)));
+    let (mut errors, mut phred_sum, mut distinct) = (0.0, 0u64, 0);
+    for (q, &count) in counts[33..=126].iter().enumerate() {
+        errors += table[q] * f64::from(count);
+        phred_sum += q as u64 * u64::from(count);
+        distinct += usize::from(count != 0);
+    }
+    QualitySummary {
+        errors: if distinct > 1 { errors as f32 } else { -1.0 },
+        phred_sum,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn expected_errors(len: usize, qual: &[u8]) -> f32 {
+    quality_summary(len, qual).errors
+}
+
+/// Usable-quality noise; unavailable summaries have no quality-derived estimate.
+pub(crate) fn read_noise(len: usize, errors: f32, params: &OntDedupParams) -> Option<f64> {
+    (errors >= 0.0).then(|| {
+        params.noise_scale
+            * (params.quality_calibration * f64::from(errors)
+                + params.quality_error_floor * len as f64)
+    })
+}
+
+/// Extra spread models noise misprediction, while divergence adds Poisson variance.
+pub(crate) fn noise_variance(mu: f64, noise: f64, cv: f64) -> f64 {
+    mu + (cv * noise).powi(2)
+}
+
+/// Upper cap; safe for a cheap precheck before calculating the pair budget.
+pub(crate) fn whole_read_cap(a_len: usize, b_len: usize, params: &OntDedupParams) -> usize {
+    let longer = a_len.max(b_len);
+    (params.max_error_frac * longer as f64).floor() as usize
+}
+
+/// None represents T=-1. Unavailable summaries get an assumed expected-error
+/// count, not a cap-sized acceptance budget. Arithmetic after summary rounding
+/// is f64 and symmetric, including when only one read has usable qualities.
+/// Usable qualities contribute noise_scale * (c * expected_errors + f * length).
+/// Unavailable qualities contribute assumed_error_rate * length, without
+/// quality terms or noise_scale.
+pub(crate) fn pair_budget(
+    a_len: usize,
+    b_len: usize,
+    a_errors: f32,
+    b_errors: f32,
+    params: &OntDedupParams,
+) -> Option<usize> {
+    if a_len == 0 || b_len == 0 {
+        return None;
+    }
+    let errors =
+        |len, e| read_noise(len, e, params).unwrap_or(params.assumed_error_rate * len as f64);
+    let noise = errors(a_len, a_errors) + errors(b_len, b_errors);
+    let mu = noise + params.protect_divergence * a_len.min(b_len) as f64;
+    // The extra spread models misprediction of the noise, so it scales with
+    // the noise only: variance = mu + (pair_distance_cv * noise)^2. Applied to
+    // all of mu, it would keep the cutoff a fixed fraction below the mean at
+    // every length, and longer reads would gain no power.
+    lower_tail_budget(
+        mu,
+        noise_variance(mu, noise, params.pair_distance_cv),
+        whole_read_cap(a_len, b_len, params),
+    )
+}
+
+/// Largest k <= cap with F(k) < .05 for NB(mean, variance), or Poisson
+/// when variance equals the mean.
+/// Sum relative masses starting at one, keeping log(P(0)) separately. Rescale
+/// before masses grow too large. Never initialize a recurrence with exp(logP0),
+/// which can underflow and silently turn an entire CDF into zero.
+fn lower_tail_budget(mu: f64, variance: f64, cap: usize) -> Option<usize> {
+    if !mu.is_finite() || mu < 0.0 || !variance.is_finite() || variance < mu {
+        return None;
+    }
+    if mu == 0.0 {
+        return None;
+    }
+    let h2 = (variance - mu) / mu / mu;
+    let scaled_mean = mu * h2;
+    if !h2.is_finite() || !scaled_mean.is_finite() {
+        return None;
+    }
+    let mut log_scale = if h2 == 0.0 || scaled_mean == 0.0 {
+        -mu
+    } else {
+        -scaled_mean.ln_1p() / h2
+    };
+    if !log_scale.is_finite() {
+        return None;
+    }
+    let mut threshold = (0.05_f64.ln() - log_scale).exp();
+    let (mut mass, mut sum) = (1.0, 1.0);
+    if sum >= threshold {
+        return None;
+    }
+    let step = mu / (1.0 + scaled_mean);
+    for k in 1..=cap {
+        let ratio = step * (1.0 + (k - 1) as f64 * h2) / k as f64;
+        mass *= ratio;
+        sum += mass;
+        if !sum.is_finite() {
+            return None;
+        }
+        if sum >= threshold {
+            return Some(k - 1);
+        }
+        if sum > 1e100 {
+            log_scale += sum.ln();
+            mass /= sum;
+            sum = 1.0;
+            threshold = (0.05_f64.ln() - log_scale).exp();
+        }
+    }
+    Some(cap)
+}
+
+/// Assumed-rate comparator, with the production order: cap, ends, budget,
+/// length compatibility, then whole-read alignment.
+#[cfg(test)]
+pub(crate) fn is_duplicate(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
+    let cap = whole_read_cap(a.len(), b.len(), params);
+    if a.len().abs_diff(b.len()) > cap {
+        return false;
+    }
+    let (b_start, b_end) = end_windows(b.len(), params);
+    if !ends_match(a, &b[b_start], &b[b_end], params) {
+        return false;
+    }
+    let budget = pair_budget(a.len(), b.len(), -1.0, -1.0, params);
+    budget.is_some_and(|t| lengths_compatible(a.len(), b.len(), t) && whole_read_matches(a, b, t))
+}
 
 /// Edit distance is at least the length difference, so this cheap check can
 /// reject before any alignment.
-pub(crate) fn lengths_compatible(a_len: usize, b_len: usize, params: &OntDedupParams) -> bool {
-    a_len.abs_diff(b_len) <= whole_read_budget(a_len, b_len, params)
+pub(crate) fn lengths_compatible(a_len: usize, b_len: usize, budget: usize) -> bool {
+    a_len.abs_diff(b_len) <= budget
 }
 
 /// Ranges of the start and end windows of a sequence of length `len`.
@@ -93,16 +295,9 @@ pub(crate) fn ends_match(a: &[u8], b_start: &[u8], b_end: &[u8], params: &OntDed
     end_window_matches(&reversed(&a[a_end]), &reversed(b_end), params)
 }
 
-pub(crate) fn whole_read_matches(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
-    editdistancek::edit_distance_bounded(a, b, whole_read_budget(a.len(), b.len(), params))
-        .is_some()
-}
-
-fn whole_read_budget(a_len: usize, b_len: usize, params: &OntDedupParams) -> usize {
-    let longer = a_len.max(b_len);
-    // Edit distance never exceeds the longer length, so cap there (this also
-    // keeps out-of-range fractions from overflowing).
-    ((params.max_error_frac * longer as f64).floor() as usize).min(longer)
+#[cfg(test)]
+pub(crate) fn whole_read_matches(a: &[u8], b: &[u8], budget: usize) -> bool {
+    editdistancek::edit_distance_bounded(a, b, budget).is_some()
 }
 
 /// Whether two end windows, read from the boundary inward, agree.
@@ -204,30 +399,22 @@ fn anchored_end_cost(a: &[u8], b: &[u8], free_skip: usize, max_cost: u32) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ont::test_util::{cap_only, random_seq, substitute};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
-
-    fn random_seq(len: usize, rng: &mut StdRng) -> Vec<u8> {
-        (0..len).map(|_| b"ACGT"[rng.gen_range(0..4)]).collect()
-    }
 
     fn params(max_end_offset: usize, max_end_errors: usize) -> OntDedupParams {
         OntDedupParams {
             max_end_offset,
             end_check_len: 64,
             max_end_errors,
-            max_error_frac: 0.05,
-            rc_tolerant: true,
+            ..cap_only(0.05)
         }
     }
 
     fn ends_match_full(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
         let (start, end) = end_windows(b.len(), params);
         ends_match(a, &b[start], &b[end], params)
-    }
-
-    fn substitute(seq: &mut [u8], pos: usize) {
-        seq[pos] = if seq[pos] == b'A' { b'C' } else { b'A' };
     }
 
     #[test]
@@ -257,7 +444,7 @@ mod tests {
         // 20 bp shorter at the start: within a 5% whole-read budget (100
         // edits), but a different fragment endpoint.
         let shifted = &seq[20..];
-        assert!(whole_read_matches(shifted, &seq, &params(3, 6)));
+        assert!(whole_read_matches(shifted, &seq, 100));
         assert!(!is_duplicate(shifted, &seq, &params(3, 6)));
         // Same at the 3' end.
         let shifted = &seq[..1980];
@@ -315,7 +502,7 @@ mod tests {
             (d.max_end_offset, d.end_check_len, d.max_end_errors),
             (2, 32, 3)
         );
-        assert_eq!((d.max_error_frac, d.rc_tolerant), (0.04, true));
+        assert_eq!((d.max_error_frac, d.rc_tolerant), (0.12, true));
         // With the defaults: 2 bases of displacement pass, 3 don't (even
         // though 3 edits are allowed), and 3 substitutions in the 32-base
         // window pass while 4 don't.
@@ -339,11 +526,11 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(12);
         let seq = random_seq(1500, &mut rng);
         let defaults = OntDedupParams::default();
-        let edits: [&dyn Fn(&mut Vec<u8>); 4] = [
-            &|r| substitute(r, 0),
-            &|r| substitute(r, 2),
-            &|r| r.insert(1, b'T'),
-            &|r| {
+        let edits: [fn(&mut Vec<u8>); 4] = [
+            |r| substitute(r, 0),
+            |r| substitute(r, 2),
+            |r| r.insert(1, b'T'),
+            |r| {
                 r.remove(3);
                 substitute(r, 6);
             },
@@ -378,12 +565,8 @@ mod tests {
             substitute(&mut read, pos);
         }
         assert!(ends_match_full(&read, &seq, &params(0, 0)));
-        assert!(!is_duplicate(&read, &seq, &params(0, 0)));
-        let loose = OntDedupParams {
-            max_error_frac: 0.06,
-            ..params(0, 0)
-        };
-        assert!(is_duplicate(&read, &seq, &loose));
+        assert!(!whole_read_matches(&read, &seq, 50));
+        assert!(whole_read_matches(&read, &seq, 60));
     }
 
     #[test]
@@ -455,5 +638,209 @@ mod tests {
                 "trial {trial}: skip={skip} max_cost={max_cost}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+    fn cutoff(mu: f64, cv: f64, cap: usize) -> Option<usize> {
+        lower_tail_budget(mu, noise_variance(mu, mu, cv), cap)
+    }
+
+    /// The budget for a pair with this noise and divergence term, cv 0.25.
+    fn expected(noise: f64, divergence: f64, cap: usize) -> Option<usize> {
+        let mu = noise + divergence;
+        cutoff(mu, 0.25 * noise / mu, cap)
+    }
+
+    #[test]
+    fn calibration_and_floor_apply_only_to_usable_qualities() {
+        let mut p = OntDedupParams {
+            protect_divergence: 0.01,
+            ..Default::default()
+        };
+        assert_eq!(p.quality_calibration, 1.2);
+        for c in [0.5, 1.0, 2.0, 5.0] {
+            p.quality_calibration = c;
+            let budget = |ea, eb| pair_budget(1000, 1200, ea, eb, &p);
+            assert_eq!(budget(-1.0, -1.0), expected(22.0, 10.0, 144));
+            assert_eq!(
+                budget(10.0, -1.0),
+                expected(c * 10.0 + 2.0 + 12.0, 10.0, 144)
+            );
+            assert_eq!(
+                budget(-1.0, 12.0),
+                expected(10.0 + c * 12.0 + 2.4, 10.0, 144)
+            );
+            assert_eq!(budget(10.0, 12.0), expected(c * 22.0 + 4.4, 10.0, 144));
+        }
+    }
+
+    #[test]
+    fn noise_scale_multiplies_both_quality_terms_only() {
+        let mut p = OntDedupParams::default();
+        for scale in [0.5, 1.0, 4.0] {
+            p.noise_scale = scale;
+            assert_eq!(read_noise(1000, -1.0, &p), None);
+            assert_eq!(read_noise(1000, 10.0, &p), Some(scale * 14.0));
+            assert_eq!(
+                pair_budget(1000, 1000, -1.0, -1.0, &p),
+                pair_budget(1000, 1000, -1.0, -1.0, &OntDedupParams::default())
+            );
+        }
+    }
+
+    #[test]
+    fn validates_statistical_parameters() {
+        type Setter = fn(&mut OntDedupParams, f64);
+        // (setter, must be positive, upper bound)
+        let fields: [(Setter, bool, f64); 8] = [
+            (|p, v| p.max_error_frac = v, false, 1.0),
+            (|p, v| p.protect_divergence = v, true, 1.0),
+            (|p, v| p.quality_calibration = v, true, 100.0),
+            (|p, v| p.noise_scale = v, true, 100.0),
+            (|p, v| p.quality_error_floor = v, false, 1.0),
+            (|p, v| p.pair_distance_cv = v, false, 100.0),
+            (|p, v| p.seed_drift_frac = v, false, 1.0),
+            (|p, v| p.assumed_error_rate = v, false, 1.0),
+        ];
+        for (set, positive, max) in fields {
+            for value in [
+                f64::NAN,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                -0.1,
+                0.0,
+                0.04,
+                1.0,
+                1.1,
+                100.0,
+                100.1,
+                f64::MAX,
+            ] {
+                let mut p = OntDedupParams::default();
+                set(&mut p, value);
+                let valid =
+                    value.is_finite() && value >= 0.0 && (!positive || value > 0.0) && value <= max;
+                assert_eq!(p.validate().is_ok(), valid, "{p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn phred_sums_availability_and_no_floor() {
+        assert!((f64::from(expected_errors(3, b"!+5")) - 1.11).abs() < 1e-7);
+        assert_eq!(expected_errors(10, b""), -1.0);
+        assert_eq!(expected_errors(3, b"555"), -1.0);
+        assert_eq!(expected_errors(0, b""), -1.0);
+        assert!(expected_errors(2, b"}~") < 2e-9);
+        let q = b"+5?I";
+        assert_eq!(
+            expected_errors(4, q),
+            expected_errors(4, &q.iter().rev().copied().collect::<Vec<_>>())
+        );
+        for (len, q) in [(1, &b"55"[..]), (2, &b"  "[..]), (2, &b"5\x7f"[..])] {
+            assert!(std::panic::catch_unwind(|| expected_errors(len, q)).is_err());
+        }
+    }
+
+    #[test]
+    fn discrete_goldens_and_strict_boundary() {
+        assert_eq!(cutoff(3.0, 0.25, 1000), None);
+        assert_eq!(cutoff(4.0, 0.25, 1000), Some(0));
+        assert_eq!(cutoff(30.0, 0.25, 1000), Some(15));
+        assert_eq!(cutoff(30.0, 0.25, 7), Some(7));
+        assert_eq!(cutoff(-0.05_f64.ln(), 0.0, 100), None);
+        assert_eq!(cutoff(-0.05_f64.ln() + 1e-10, 0.0, 100), Some(0));
+        assert_eq!(cutoff(0.0, 0.0, 100), None);
+        // Unlike a floor at mu0, the lower tail deliberately sacrifices recall.
+        let p = OntDedupParams {
+            quality_calibration: 1.0,
+            protect_divergence: 0.01,
+            ..Default::default()
+        };
+        // Expected noise is 10 + 10 + 2 * 0.002 * 1000 = 24 edits.
+        assert!(pair_budget(1000, 1000, 10.0, 10.0, &p).unwrap() < 24);
+    }
+
+    #[test]
+    fn large_means_and_small_dispersion_do_not_underflow_to_cap() {
+        // Poisson(1000) lower 5% tail ends at 947; P(0) underflows.
+        for cv in [0.0, 1e-12, 1e-6] {
+            assert_eq!(cutoff(1000.0, cv, 2000), Some(947));
+        }
+        assert_eq!(cutoff(10000.0, 0.0, 20000), Some(9835));
+        assert_eq!(cutoff(f64::INFINITY, 0.25, 1000), None);
+        assert_eq!(cutoff(f64::NAN, 0.25, 1000), None);
+    }
+
+    #[test]
+    fn budgets_are_symmetric_and_monotone() {
+        let p = OntDedupParams {
+            quality_error_floor: 0.0,
+            quality_calibration: 1.0,
+            protect_divergence: 0.01,
+            ..Default::default()
+        };
+        let (a, b) = (expected_errors(3, b"!+5"), expected_errors(4, b"+5?I"));
+        assert_eq!(
+            pair_budget(1000, 1200, a, b, &p),
+            pair_budget(1200, 1000, b, a, &p)
+        );
+        assert_eq!(
+            pair_budget(1000, 1200, -1.0, b, &p),
+            pair_budget(1200, 1000, b, -1.0, &p)
+        );
+        // Unavailable qualities get E=.01L and the same protected cutoff.
+        assert_eq!(
+            pair_budget(1000, 1200, -1.0, -1.0, &p),
+            pair_budget(1000, 1200, 10.0, 12.0, &p)
+        );
+        for cv in [0.0, 0.01, 0.25, 1.0] {
+            let mut last = None;
+            for i in 0..500 {
+                let next = cutoff(i as f64 * 0.5, cv, 300);
+                assert!(next >= last, "cv={cv} i={i}");
+                last = next;
+            }
+        }
+        type Set = fn(&mut OntDedupParams, &mut f32, &mut f32, usize);
+        let setters: [Set; 7] = [
+            |_, a, _, i| *a = i as f32,
+            |_, _, b, i| *b = i as f32,
+            |p, _, _, i| p.quality_calibration = i as f64 / 20.0,
+            |p, _, _, i| p.quality_error_floor = i as f64 / 5000.0,
+            |p, _, _, i| p.protect_divergence = i as f64 / 1000.0,
+            |p, _, _, i| p.max_error_frac = i as f64 / 1000.0,
+            |p, _, _, i| p.noise_scale = i as f64 / 20.0,
+        ];
+        for (field, set) in setters.into_iter().enumerate() {
+            let mut last = None;
+            for i in 1..=100 {
+                let mut q = p.clone();
+                let (mut ea, mut eb) = (10.0, 12.0);
+                set(&mut q, &mut ea, &mut eb, i);
+                let next = pair_budget(1000, 1200, ea, eb, &q);
+                assert!(next >= last, "field={field} i={i}");
+                last = next;
+            }
+        }
+        // Divergence evidence uses the shorter read; don't add length difference.
+        assert_eq!(
+            pair_budget(1000, 1200, 10.0, 12.0, &p),
+            expected(22.0, 0.01 * 1000.0, 144)
+        );
+    }
+
+    #[test]
+    fn lengths_use_exact_integer_budget() {
+        assert!(lengths_compatible(1000, 1015, 15));
+        assert!(!lengths_compatible(1000, 1016, 15));
+        assert!(lengths_compatible(1015, 1000, 15));
+        assert_eq!(
+            pair_budget(0, 0, -1.0, -1.0, &OntDedupParams::default()),
+            None
+        );
     }
 }

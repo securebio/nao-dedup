@@ -5,8 +5,13 @@
 //!     --sub-rate <P> --ins-rate <P> --del-rate <P> --n-molecules 20000
 //! (Error rates are required; choose them to suit the reads being modeled.)
 
+#[path = "common/dedup.rs"]
+mod dedup;
+#[path = "common/quality_noise.rs"]
+mod quality_noise;
+
 use clap::Parser;
-use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams};
+use nao_dedup::ont::{OntDedupContext, OntMinimizerParams};
 use ont_sim::{SimConfig, evaluate, simulate};
 use std::time::Instant;
 
@@ -14,23 +19,17 @@ use std::time::Instant;
 struct Args {
     #[command(flatten)]
     sim: SimConfig,
-    #[arg(long, default_value_t = OntDedupParams::default().max_end_offset)]
-    max_end_offset: usize,
-    #[arg(long, default_value_t = OntDedupParams::default().end_check_len)]
-    end_check_len: usize,
-    #[arg(long, default_value_t = OntDedupParams::default().max_end_errors)]
-    max_end_errors: usize,
-    #[arg(long, default_value_t = OntDedupParams::default().max_error_frac)]
-    max_error_frac: f64,
+    #[command(flatten)]
+    dedup: dedup::DedupArgs,
+    #[command(flatten)]
+    noise: quality_noise::QualityNoiseArgs,
+
     #[arg(long, default_value_t = OntMinimizerParams::default().kmer_len)]
     kmer_len: usize,
     #[arg(long, default_value_t = OntMinimizerParams::default().window_len)]
     window_len: usize,
     #[arg(long, default_value_t = OntMinimizerParams::default().num_windows)]
     num_windows: usize,
-    /// Only match reads in the same orientation.
-    #[arg(long)]
-    no_rc: bool,
     /// Print metrics as one JSON object instead of text.
     #[arg(long)]
     json: bool,
@@ -38,17 +37,12 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let sim = simulate(&args.sim)?;
-    let dedup_params = OntDedupParams {
-        max_end_offset: args.max_end_offset,
-        end_check_len: args.end_check_len,
-        max_end_errors: args.max_end_errors,
-        max_error_frac: args.max_error_frac,
-        rc_tolerant: !args.no_rc,
-    };
+    let dedup_params = args.noise.params(args.dedup.params());
+    dedup_params.validate()?;
     let minimizer_params =
         OntMinimizerParams::new(args.kmer_len, args.window_len, args.num_windows)?;
 
+    let sim = simulate(&args.sim)?;
     let start = Instant::now();
     let mut ctx = OntDedupContext::new(dedup_params, minimizer_params);
     for (idx, read) in sim.reads.iter().enumerate() {
@@ -65,20 +59,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stats = ctx.detailed_stats();
     if args.json {
         println!(
-            "{{\"metrics\":{},\"seconds\":{seconds},\"unseeded_reads\":{},\"postings_visited\":{},\"candidates_compared\":{}}}",
+            "{{\"metrics\":{},\"seconds\":{seconds},\"unseeded_reads\":{},\"postings_visited\":{},\"candidates_compared\":{},\"unavailable_quality_reads\":{},\"assumed_rate_comparisons\":{}}}",
             result.to_json(),
             stats.unseeded_reads,
             stats.postings_visited,
-            stats.candidates_compared
+            stats.candidates_compared,
+            stats.unavailable_quality_reads,
+            stats.assumed_rate_comparisons
         );
     } else {
         print!("{result}");
         println!(
-            "seconds={seconds:.3} us_per_read={:.2} unseeded_reads={} postings_per_read={:.1} candidates_per_read={:.3}",
+            "seconds={seconds:.3} us_per_read={:.2} unseeded_reads={} postings_per_read={:.1} candidates_per_read={:.3} unavailable_quality_reads={} assumed_rate_comparisons={}",
             seconds * 1e6 / sim.reads.len().max(1) as f64,
             stats.unseeded_reads,
             stats.postings_visited as f64 / sim.reads.len().max(1) as f64,
-            stats.candidates_compared as f64 / sim.reads.len().max(1) as f64
+            stats.candidates_compared as f64 / sim.reads.len().max(1) as f64,
+            stats.unavailable_quality_reads,
+            stats.assumed_rate_comparisons
         );
     }
     Ok(())

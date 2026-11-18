@@ -8,13 +8,20 @@
 //! Other cells measure false merges between different molecules. Each trial
 //! starts with a fresh context, so merge probability is for an isolated pair.
 
+#[path = "common/dedup.rs"]
+mod dedup;
+#[path = "common/quality_noise.rs"]
+mod quality_noise;
+
 use clap::{Parser, ValueEnum};
-use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams};
-use ont_sim::{add_errors, reverse_complement};
+use nao_dedup::ont::{OntDedupContext, OntMinimizerParams};
+use ont_sim::{QualityConfig, add_errors, add_quality_errors, reverse_complement};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 #[derive(Parser)]
 struct Args {
+    #[command(flatten)]
+    quality: QualityConfig,
     #[arg(long)]
     sub_rate: f64,
     #[arg(long)]
@@ -43,24 +50,16 @@ struct Args {
     trials: usize,
     #[arg(long, default_value_t = 1)]
     seed: u64,
-    #[arg(long, default_value_t = OntDedupParams::default().max_end_offset)]
-    max_end_offset: usize,
-    #[arg(long, default_value_t = OntDedupParams::default().end_check_len)]
-    end_check_len: usize,
-    #[arg(long, default_value_t = OntDedupParams::default().max_end_errors)]
-    max_end_errors: usize,
-    #[arg(long, default_value_t = OntDedupParams::default().max_error_frac)]
-    max_error_frac: f64,
+    #[command(flatten)]
+    dedup: dedup::DedupArgs,
+    #[command(flatten)]
+    noise: quality_noise::QualityNoiseArgs,
     #[arg(long, default_value_t = OntMinimizerParams::default().kmer_len)]
     kmer_len: usize,
     #[arg(long, default_value_t = OntMinimizerParams::default().window_len)]
     window_len: usize,
     #[arg(long, default_value_t = OntMinimizerParams::default().num_windows)]
     num_windows: usize,
-    /// Only match reads in the same orientation; both reads of a pair then
-    /// share a strand.
-    #[arg(long)]
-    no_rc: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -136,7 +135,10 @@ fn wilson_upper(merges: usize, trials: usize) -> f64 {
 
 fn validate(args: &Args) -> Result<(), String> {
     let rates = [args.sub_rate, args.ins_rate, args.del_rate];
-    if rates.iter().any(|r| !(0.0..1.0).contains(r)) || rates.iter().sum::<f64>() >= 1.0 {
+    args.quality.validate(rates, args.homopolymer_indel_mult)?;
+    if !args.quality.quality_conditioned
+        && (rates.iter().any(|r| !(0.0..1.0).contains(r)) || rates.iter().sum::<f64>() >= 1.0)
+    {
         return Err(
             "sequencing error rates must be finite, in [0,1), and sum to less than 1".into(),
         );
@@ -174,9 +176,7 @@ fn validate(args: &Args) -> Result<(), String> {
     {
         return Err("lengths and offsets are too large for the coordinate map".into());
     }
-    if !(0.0..=1.0).contains(&args.max_error_frac) {
-        return Err("--max-error-frac must be finite and in [0,1]".into());
-    }
+    args.noise.params(args.dedup.params()).validate()?;
     OntMinimizerParams::new(args.kmer_len, args.window_len, args.num_windows)?;
     Ok(())
 }
@@ -191,37 +191,44 @@ fn trial(args: &Args, mode: Mode, divergence: f64, offset: usize, rng: &mut StdR
     let (start, end) = molecule_interval(len, flank, offset, mode, rng);
     let templates = [&source[flank..flank + len], &variant[map[start]..map[end]]];
     let mut ctx = OntDedupContext::new(
-        OntDedupParams {
-            max_end_offset: args.max_end_offset,
-            end_check_len: args.end_check_len,
-            max_end_errors: args.max_end_errors,
-            max_error_frac: args.max_error_frac,
-            rc_tolerant: !args.no_rc,
-        },
+        args.noise.params(args.dedup.params()),
         OntMinimizerParams::new(args.kmer_len, args.window_len, args.num_windows).unwrap(),
     );
     // Under --no-rc both reads share one strand, so the duplicate control
     // still measures recall; otherwise each read's strand is independent.
     let shared_strand = rng.gen_bool(0.5);
     for (idx, template) in templates.into_iter().enumerate() {
-        let (mut read, _) = add_errors(
-            template,
-            args.sub_rate,
-            args.ins_rate,
-            args.del_rate,
-            args.homopolymer_indel_mult,
-            rng,
-        );
-        let rc = if args.no_rc {
+        let (mut read, mut quality) = if args.quality.quality_conditioned {
+            let (read, quality, _) = add_quality_errors(
+                template,
+                &args.quality,
+                [args.sub_rate, args.ins_rate, args.del_rate],
+                args.homopolymer_indel_mult,
+                rng,
+            );
+            (read, quality)
+        } else {
+            let (read, _) = add_errors(
+                template,
+                args.sub_rate,
+                args.ins_rate,
+                args.del_rate,
+                args.homopolymer_indel_mult,
+                rng,
+            );
+            let quality = vec![b'5'; read.len()];
+            (read, quality)
+        };
+        let rc = if args.dedup.no_rc {
             shared_strand
         } else {
             rng.gen_bool(0.5)
         };
         if rc {
             read = reverse_complement(&read);
+            quality.reverse();
         }
-        // Constant quality: exemplar selection does not affect whether this pair merges.
-        ctx.process_read_by_index(idx, &read, &vec![b'5'; read.len()]);
+        ctx.process_read_by_index(idx, &read, &quality);
     }
     ctx.finalize();
     ctx.get_exemplar_index(0) == ctx.get_exemplar_index(1)
@@ -377,6 +384,11 @@ mod tests {
         a.sub_rate = 0.5;
         a.ins_rate = 0.5;
         assert!(validate(&a).is_err());
+        a.quality = QualityConfig::enabled(0.01, 0.2, 1.5, 1.0, 0.1);
+        a.sub_rate = 4.0;
+        a.ins_rate = 3.0;
+        a.del_rate = 3.0;
+        assert!(validate(&a).is_ok());
         let mut a = args();
         a.divergences.clear();
         assert!(validate(&a).is_err());
@@ -395,7 +407,7 @@ mod tests {
         for _ in 0..20 {
             assert!(trial(&a, Mode::Both, 0.0, 0, &mut rng));
         }
-        a.no_rc = true;
+        a.dedup.no_rc = true;
         for _ in 0..20 {
             assert!(trial(&a, Mode::One, 0.0, 0, &mut rng));
         }
@@ -404,9 +416,9 @@ mod tests {
     #[test]
     fn strict_dedup_distinguishes_sequence_and_endpoint_near_misses() {
         let mut a = args();
-        a.max_end_offset = 0;
-        a.max_end_errors = 0;
-        a.max_error_frac = 0.0;
+        a.dedup.max_end_offset = 0;
+        a.dedup.max_end_errors = 0;
+        a.dedup.max_error_frac = 0.0;
         let mut rng = StdRng::seed_from_u64(a.seed);
         for _ in 0..20 {
             assert!(trial(&a, Mode::One, 0.0, 0, &mut rng));

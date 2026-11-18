@@ -96,11 +96,9 @@ Single-threaded; we parallelize by running multiple files concurrently.
 
 ## ONT (Nanopore) Deduplication
 
-`dedup_ont_fastq` deduplicates single-end ONT reads. PCR copies of a
-fragment share both of its endpoints, so two reads are duplicates when both
-endpoints agree within a few bases and the sequences match within an
-indel-aware edit budget. Reads from opposite strands match by default. See
-[docs/ont-design.md](docs/ont-design.md) for the design.
+`dedup_ont_fastq` deduplicates single-end ONT reads. Copies of a fragment must
+share both endpoints and match within an indel-aware edit budget. Opposite
+strands match by default. See [docs/ont-design.md](docs/ont-design.md).
 
 ```bash
 cargo build --release --bin dedup_ont_fastq
@@ -108,23 +106,44 @@ cargo build --release --bin dedup_ont_fastq
   --assignments assignments.tsv
 ```
 
-- **Input**: a FASTQ file, gzip-compressed or plain. It is read twice, so it
-  can't be a stream.
-- **Output**: one exemplar record per duplicate group, unchanged except that
-  line endings are normalized to `\n`. The output
-  is gzip-compressed if the path ends in `.gz`; otherwise it is plain, which
-  is faster and can be piped to a parallel compressor, e.g.
-  `dedup_ont_fastq in.fastq.gz /dev/stdout | pigz > out.fastq.gz`.
-- **`--assignments`** writes `read_idx`/`exemplar_idx` for every read (0-based
-  input positions).
-- **`--no-rc`** only matches reads in the same orientation, for directional
-  libraries.
-- **Other parameters**: `--help` lists the endpoint and seed parameters.
+- **INPUT** accepts plain or gzip FASTQ, detected by content. Reads stream
+  directly into clustering.
+- **OUTPUT** contains one exemplar per group, preserving record text except
+  for normalizing line endings to `\n`. A `.gz` suffix enables gzip compression;
+  plain output can go to `/dev/stdout` for a parallel compressor.
+  Writing FASTQ requires a second pass, so INPUT must be a regular file.
+  Streams (including `-` for stdin and named pipes) require `--assignments`
+  without OUTPUT; invalid combinations are rejected before input is read.
+- **`--assignments PATH`** writes `read_idx`/`exemplar_idx` for every read
+  using 0-based input positions. OUTPUT is optional with this flag.
+- **`--protect-divergence`** sets the strain divergence against which to
+  protect (default 0.015, or 1.5%). Each pair gets a cutoff based on expected
+  sequencing noise and this divergence. Short or noisy reads can remain
+  unmerged when the evidence is insufficient.
+- **`--noise-scale POSITIVE`** overrides the multiplier on the quality-derived
+  noise estimate (default 1.0). The expected noise per read is
+  `noise_scale × (scale × quality-predicted errors + per-base floor × length)`,
+  with scale and floor defaulting to 1.2 and 0.002.
+- **`--no-rc`** restricts matching to the same orientation.
+- **Expert flags:** `--max-end-offset` sets endpoint tolerance (default 2
+  bases). `--assumed-error-rate` sets per-base noise for empty or exactly
+  constant qualities (default 0.01); the quality scale and floor do not apply
+  to these reads. The CLI reports affected reads and comparisons.
 
-From Rust, use `nao_dedup::ont::OntDedupContext`. It has the same shape as
-`DedupContext` (`process_read_by_index`, `finalize`, `get_exemplar_index`,
-`get_exemplar_indices`, `stats`), but takes one `&[u8]` sequence and quality
-per read.
+For a single pass from plain or gzip stdin, write assignments only:
+
+```bash
+cat input.fastq.gz | ./target/release/dedup_ont_fastq - --assignments assignments.tsv
+```
+
+From Rust, use `nao_dedup::ont::OntDedupContext`: feed sequence/quality slices
+with `process_read_by_index`, then `finalize` and query `get_exemplar_index`.
+Library parameters include `quality_calibration` (default 1.2),
+`quality_error_floor` (default 0.002), `noise_scale` (default 1.0), and endpoint,
+distance and seed controls. `noise_scale` multiplies both usable-quality noise
+terms; assumed-rate noise is independent of it.
+Invalid parameters or malformed nonempty Phred+33 quality strings panic.
+`ont::validate_quality` checks the byte range without panicking.
 
 ---
 

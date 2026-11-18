@@ -8,7 +8,8 @@
 //! (by quality, then length) is tracked and resolved in `finalize()`.
 
 use super::compare::{
-    OntDedupParams, end_windows, ends_match, lengths_compatible, whole_read_matches,
+    OntDedupParams, end_windows, ends_match, lengths_compatible, pair_budget, quality_summary,
+    whole_read_cap,
 };
 use super::leaders::LeaderStore;
 use super::reverse_complement_into;
@@ -16,6 +17,7 @@ use super::seeds::{EndSeeds, OntMinimizerParams, end_seeds};
 use ahash::AHashSet;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use std::cell::OnceCell;
 
 /// Most seeds belong to a single leader, so a bucket holds one posting
 /// inline and allocates only when it grows.
@@ -58,11 +60,11 @@ struct Cluster {
 /// `max_end_errors`. In repetitive sequence a shared seed may be a different
 /// copy of the k-mer, and the filter can then skip a duplicate.
 /// Further in, indels beyond the end window are only bounded by the
-/// whole-read error rate, so the allowance grows with distance; this part is
+/// independent `seed_drift_frac`, so the allowance grows with distance; this part is
 /// a heuristic, not a guarantee, and a rare dense indel cluster could hide a
 /// duplicate.
 fn offsets_compatible(a: u16, b: u16, params: &OntDedupParams) -> bool {
-    let drift = (params.max_error_frac * f64::from(a.max(b))).ceil() as usize;
+    let drift = (params.seed_drift_frac * f64::from(a.max(b))).ceil() as usize;
     usize::from(a.abs_diff(b)) <= params.max_end_offset + params.max_end_errors + drift
 }
 
@@ -105,40 +107,50 @@ struct LeaderScratch {
     full: Vec<u8>,
 }
 
-/// `is_duplicate(read, leader)` for a packed leader, unpacking only what
-/// each stage needs: the end windows first, the whole leader only if the
-/// ends match.
+/// Match a packed leader, unpacking its ends first and its full sequence
+/// only after the endpoint and budget checks pass. A successful match carries
+/// the exact edit distance.
 fn matches_leader(
     read: &[u8],
+    errors: (f32, f32),
+    budget: &OnceCell<Option<usize>>,
     leaders: &LeaderStore,
     id: u32,
     scratch: &mut LeaderScratch,
     params: &OntDedupParams,
-) -> bool {
+) -> Option<usize> {
     let len = leaders.len(id);
-    if !lengths_compatible(read.len(), len, params) {
-        return false;
+    let cap = whole_read_cap(read.len(), len, params);
+    if read.len().abs_diff(len) > cap {
+        return None;
     }
     let (start, end) = end_windows(len, params);
     leaders.unpack_into(id, start, &mut scratch.start);
     leaders.unpack_into(id, end, &mut scratch.end);
     if !ends_match(read, &scratch.start, &scratch.end, params) {
-        return false;
+        return None;
+    }
+    // The same candidate may be tried in both orientations. Its summary and
+    // cutoff are invariant, including rejection, so calculate the cutoff once.
+    let budget =
+        (*budget.get_or_init(|| pair_budget(read.len(), len, errors.0, errors.1, params)))?;
+    if !lengths_compatible(read.len(), len, budget) {
+        return None;
     }
     leaders.unpack_into(id, 0..len, &mut scratch.full);
-    whole_read_matches(read, &scratch.full, params)
+    editdistancek::edit_distance_bounded(read, &scratch.full, budget)
 }
 
 /// The offsets `b` compatible with `a` under `offsets_compatible`, which
 /// form one contiguous range: below `a` the allowance is fixed, and above
-/// `a` it grows by at most one per base when `max_error_frac` < 1.
+/// `a` it grows by at most one per base when `seed_drift_frac` < 1.
 fn compatible_offset_range(a: u16, params: &OntDedupParams) -> (u16, u16) {
     let base = params.max_end_offset + params.max_end_errors;
-    let drift_at_a = (params.max_error_frac * f64::from(a)).ceil() as usize;
+    let drift_at_a = (params.seed_drift_frac * f64::from(a)).ceil() as usize;
     let lo = usize::from(a).saturating_sub(base + drift_at_a) as u16;
-    let mut hi = if params.max_error_frac < 1.0 {
+    let mut hi = if params.seed_drift_frac < 1.0 {
         // Just above the largest b with b - a <= base + frac * b + 1.
-        let estimate = (f64::from(a) + base as f64 + 1.0) / (1.0 - params.max_error_frac);
+        let estimate = (f64::from(a) + base as f64 + 1.0) / (1.0 - params.seed_drift_frac);
         estimate.min(f64::from(u16::MAX)) as u16
     } else {
         u16::MAX
@@ -167,16 +179,13 @@ fn compatible_postings<'a>(
 /// matches the Illumina path (issue #6 discusses better quality summaries).
 type Score = (f64, usize);
 
-fn score(seq: &[u8], qual: &[u8]) -> Score {
-    let mean_q = if qual.is_empty() {
+fn score(len: usize, quality_len: usize, phred_sum: u64) -> Score {
+    let mean_q = if quality_len == 0 {
         0.0
     } else {
-        qual.iter()
-            .map(|&q| u32::from(q.saturating_sub(33)))
-            .sum::<u32>() as f64
-            / qual.len() as f64
+        phred_sum as f64 / quality_len as f64
     };
-    (mean_q, seq.len())
+    (mean_q, len)
 }
 
 /// Counters describing the work done, for tuning and diagnostics.
@@ -189,6 +198,11 @@ pub struct OntDedupStats {
     /// Reads without seeds at both ends (too short or no valid k-mers);
     /// each becomes a singleton cluster.
     pub unseeded_reads: usize,
+    /// Reads with empty or exactly constant qualities (assumed-rate path).
+    pub unavailable_quality_reads: usize,
+    /// Candidate comparisons (as counted in `candidates_compared`) where the
+    /// read or the leader had no usable qualities.
+    pub assumed_rate_comparisons: usize,
     /// Bucket entries examined, summed over reads.
     pub postings_visited: usize,
     /// Alignments against leaders with seed evidence at both ends (one per
@@ -209,6 +223,8 @@ pub struct OntDedupContext {
     buckets: FxHashMap<u64, Bucket>,
     /// Leader sequences, indexed by cluster id.
     leaders: LeaderStore,
+    /// Raw expected errors for each immutable leader (-1 means unavailable).
+    leader_errors: Vec<f32>,
 
     /// Indexed by cluster id (the order clusters were created).
     clusters: Vec<Cluster>,
@@ -231,23 +247,21 @@ pub struct OntDedupContext {
 }
 
 impl OntDedupContext {
-    /// Panics if `minimizer_params` would fail `OntMinimizerParams::new`, or
-    /// if `dedup_params.max_error_frac` is not between 0 and 1.
+    /// Panics if minimizer or duplicate-matching parameters are invalid.
     pub fn new(dedup_params: OntDedupParams, minimizer_params: OntMinimizerParams) -> Self {
         let p = &minimizer_params;
         if let Err(e) = OntMinimizerParams::new(p.kmer_len, p.window_len, p.num_windows) {
             panic!("invalid OntMinimizerParams: {e}");
         }
-        assert!(
-            (0.0..=1.0).contains(&dedup_params.max_error_frac),
-            "max_error_frac must be between 0 and 1, got {}",
-            dedup_params.max_error_frac
-        );
+        if let Err(e) = dedup_params.validate() {
+            panic!("invalid OntDedupParams: {e}");
+        }
         Self {
             dedup_params,
             minimizer_params,
             buckets: FxHashMap::default(),
             leaders: LeaderStore::default(),
+            leader_errors: Vec::new(),
             clusters: Vec::new(),
             results: Vec::new(),
             stats: OntDedupStats::default(),
@@ -266,6 +280,11 @@ impl OntDedupContext {
     /// (As in the Illumina path, an index that is skipped is still counted by
     /// `stats` and reports cluster 0's exemplar.) Quality is Phred+33.
     ///
+    /// A nonempty quality slice must match sequence length and contain only
+    /// valid Phred+33 bytes (33..=126); otherwise this method panics. Empty or
+    /// exactly constant qualities use `assumed_error_rate`, including genuine
+    /// constant qualities. Varied placeholders cannot reliably be detected.
+    ///
     /// Returns the cluster id the read was assigned to.
     pub fn process_read_by_index(&mut self, idx: usize, seq: &[u8], qual: &[u8]) -> u32 {
         assert!(
@@ -273,7 +292,12 @@ impl OntDedupContext {
             "process_read_by_index called after finalize()"
         );
         let read_idx = u32::try_from(idx).expect("read index must fit in u32");
-        let score = score(seq, qual);
+        let summary = quality_summary(seq.len(), qual);
+        let errors = summary.errors;
+        let score = score(seq.len(), qual.len(), summary.phred_sum);
+        if errors < 0.0 {
+            self.stats.unavailable_quality_reads += 1;
+        }
         self.stats.reads += 1;
 
         // Comparisons are case-sensitive, so normalize case once.
@@ -285,7 +309,7 @@ impl OntDedupContext {
         if seeds.start.is_empty() || seeds.end.is_empty() {
             self.stats.unseeded_reads += 1;
         }
-        let matched = self.find_matching_cluster(&read, &seeds);
+        let matched = self.find_matching_cluster(&read, errors, &seeds);
 
         let cluster_id = match matched {
             Some(cluster_id) => {
@@ -303,6 +327,7 @@ impl OntDedupContext {
                     best_score: score,
                 });
                 self.leaders.push(&read);
+                self.leader_errors.push(errors);
                 // A leader needs seeds at both ends to ever be found.
                 if !seeds.start.is_empty() && !seeds.end.is_empty() {
                     for (at_end, end) in [(false, &seeds.start), (true, &seeds.end)] {
@@ -339,12 +364,12 @@ impl OntDedupContext {
     /// the search stops at the first match. Seeds near the ends are the most
     /// precise, and in dense groups most reads match early, which avoids
     /// scanning the large buckets of inner seeds.
-    fn find_matching_cluster(&mut self, read: &[u8], seeds: &EndSeeds) -> Option<u32> {
+    fn find_matching_cluster(&mut self, read: &[u8], errors: f32, seeds: &EndSeeds) -> Option<u32> {
         self.evidence.start_read(self.clusters.len());
         let mut rc_ready = false;
         for window in 0..seeds.start.len().max(seeds.end.len()) {
             self.collect_evidence(seeds, window);
-            if let Some(cluster) = self.align_ready(read, &mut rc_ready) {
+            if let Some(cluster) = self.align_ready(read, errors, &mut rc_ready) {
                 return Some(cluster);
             }
         }
@@ -394,9 +419,10 @@ impl OntDedupContext {
     /// repeats, seeds from one end can match the other end's sequence and
     /// point the wrong way. Each orientation is tried at most once per
     /// leader.
-    fn align_ready(&mut self, read: &[u8], rc_ready: &mut bool) -> Option<u32> {
+    fn align_ready(&mut self, read: &[u8], errors: f32, rc_ready: &mut bool) -> Option<u32> {
         let params = &self.dedup_params;
         for &cluster in self.candidates.iter() {
+            let budget = OnceCell::new();
             let bits = self.evidence.bits(cluster);
             let order = if *bits & SAME_STRAND == SAME_STRAND {
                 [(false, TRIED_SAME), (true, TRIED_OPPOSITE)]
@@ -420,8 +446,22 @@ impl OntDedupContext {
                 } else {
                     read
                 };
+                let leader_errors = self.leader_errors[cluster as usize];
+                if errors < 0.0 || leader_errors < 0.0 {
+                    self.stats.assumed_rate_comparisons += 1;
+                }
                 let scratch = &mut self.leader_scratch;
-                if matches_leader(oriented, &self.leaders, cluster, scratch, params) {
+                if matches_leader(
+                    oriented,
+                    (errors, leader_errors),
+                    &budget,
+                    &self.leaders,
+                    cluster,
+                    scratch,
+                    params,
+                )
+                .is_some()
+                {
                     return Some(cluster);
                 }
             }
@@ -430,7 +470,7 @@ impl OntDedupContext {
     }
 
     /// Resolve every read to its cluster's best read. Must be called before
-    /// querying exemplars; frees the seed index and leader sequences.
+    /// querying exemplars; frees the seed index, leaders, and scratch buffers.
     pub fn finalize(&mut self) {
         if self.finalized {
             return;
@@ -441,6 +481,13 @@ impl OntDedupContext {
         self.finalized = true;
         self.buckets = FxHashMap::default();
         self.leaders = LeaderStore::default();
+        self.leader_errors = Vec::new();
+        self.evidence = Evidence::default();
+        self.candidates = Vec::new();
+        self.hash_scratch = Vec::new();
+        self.read_scratch = Vec::new();
+        self.rc_scratch = Vec::new();
+        self.leader_scratch = LeaderScratch::default();
     }
 
     /// (total reads, clusters), as in the Illumina `DedupContext::stats`.
@@ -482,13 +529,48 @@ impl OntDedupContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ont::test_util::{random_seq, substitute};
+
+    #[test]
+    fn finalize_releases_comparison_buffers_and_preserves_exemplars() {
+        use rand::{SeedableRng, rngs::StdRng};
+        let mut rng = StdRng::seed_from_u64(144);
+        let seq = random_seq(1200, &mut rng);
+        let mut ctx =
+            OntDedupContext::new(OntDedupParams::default(), OntMinimizerParams::default());
+        ctx.process_read_by_index(0, &seq, &vec![b'5'; seq.len()]);
+        ctx.process_read_by_index(
+            1,
+            &crate::ont::reverse_complement(&seq),
+            &vec![b'?'; seq.len()],
+        );
+        assert!(!ctx.leader_scratch.full.is_empty());
+        assert!(!ctx.evidence.entries.is_empty());
+        ctx.finalize();
+        for capacity in [
+            ctx.evidence.entries.capacity(),
+            ctx.candidates.capacity(),
+            ctx.hash_scratch.capacity(),
+            ctx.read_scratch.capacity(),
+            ctx.rc_scratch.capacity(),
+            ctx.leader_scratch.start.capacity(),
+            ctx.leader_scratch.end.capacity(),
+            ctx.leader_scratch.full.capacity(),
+        ] {
+            assert_eq!(capacity, 0);
+        }
+        ctx.finalize();
+        assert_eq!(ctx.stats(), (2, 1));
+        assert_eq!(ctx.get_exemplar_index(0), 1);
+        assert_eq!(ctx.get_exemplar_index(1), 1);
+    }
 
     #[test]
     fn offset_allowance_grows_with_distance_from_the_end() {
         let params = OntDedupParams {
             max_end_offset: 2,
             max_end_errors: 5,
-            max_error_frac: 0.04,
+            seed_drift_frac: 0.04,
             ..Default::default()
         };
         // Near the end: endpoint allowance only (2 + 5 + ceil(0.04 * 10)).
@@ -507,7 +589,7 @@ mod tests {
             let params = OntDedupParams {
                 max_end_offset: 2,
                 max_end_errors: base_errors,
-                max_error_frac: frac,
+                seed_drift_frac: frac,
                 ..Default::default()
             };
             for a in (0..2000).step_by(7) {
@@ -533,18 +615,16 @@ mod tests {
         // (Q) matches the leader's end (rc(Q)) exactly. So all seed
         // evidence points to the reverse complement.
         use crate::ont::reverse_complement;
+        use rand::SeedableRng;
         use rand::rngs::StdRng;
-        use rand::{Rng, SeedableRng};
         let mut rng = StdRng::seed_from_u64(1);
-        let mut random =
-            |n: usize| -> Vec<u8> { (0..n).map(|_| b"ACGT"[rng.gen_range(0..4)]).collect() };
         let minimizer_params = OntMinimizerParams::default();
-        let p = random(256);
-        let m = random(1500);
+        let p = random_seq(256, &mut rng);
+        let m = random_seq(1500, &mut rng);
         let mut q = p.clone();
         for seed in &end_seeds(&p, &minimizer_params, &mut Vec::new()).start {
             let pos = usize::from(seed.offset) + 7;
-            q[pos] = if q[pos] == b'A' { b'C' } else { b'A' };
+            substitute(&mut q, pos);
         }
         let leader = [&p[..], &m, &reverse_complement(&q)].concat();
         let read = [&q[..], &m, &reverse_complement(&p)].concat();
@@ -600,18 +680,14 @@ mod tests {
     }
 
     #[test]
-    fn error_fraction_must_be_between_zero_and_one() {
-        let make = |max_error_frac| {
-            let params = OntDedupParams {
-                max_error_frac,
+    #[should_panic(expected = "invalid OntDedupParams")]
+    fn new_rejects_invalid_params() {
+        OntDedupContext::new(
+            OntDedupParams {
+                protect_divergence: 0.0,
                 ..Default::default()
-            };
-            std::panic::catch_unwind(|| OntDedupContext::new(params, OntMinimizerParams::default()))
-                .is_ok()
-        };
-        assert!(make(0.0) && make(1.0) && make(0.04));
-        for bad in [-0.1, 1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(!make(bad), "{bad} accepted");
-        }
+            },
+            OntMinimizerParams::default(),
+        );
     }
 }

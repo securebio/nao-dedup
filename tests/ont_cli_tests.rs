@@ -1,9 +1,10 @@
-use assert_cmd::Command;
+use assert_cmd::{Command, assert::Assert};
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::borrow::Cow;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -16,15 +17,17 @@ fn random_seq(len: usize, rng: &mut StdRng) -> String {
 }
 
 fn reverse_complement(seq: &str) -> String {
-    seq.chars()
-        .rev()
-        .map(|c| match c {
-            'A' => 'T',
-            'T' => 'A',
-            'C' => 'G',
-            _ => 'C',
-        })
-        .collect()
+    String::from_utf8(ont_sim::reverse_complement(seq.as_bytes())).unwrap()
+}
+
+fn stderr_of(result: &Assert) -> Cow<'_, str> {
+    String::from_utf8_lossy(&result.get_output().stderr)
+}
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(bytes).unwrap();
+    gz.finish().unwrap()
 }
 
 /// (name, sequence, quality character) records as FASTQ text.
@@ -65,9 +68,7 @@ fn deduplicates_gzipped_fastq_and_writes_assignments() {
         dir.path().join("out.fastq.gz"),
         dir.path().join("assign.tsv"),
     );
-    let mut gz = GzEncoder::new(File::create(&in_path).unwrap(), Compression::default());
-    gz.write_all(input.as_bytes()).unwrap();
-    gz.finish().unwrap();
+    fs::write(&in_path, gzip(input.as_bytes())).unwrap();
 
     Command::cargo_bin("dedup_ont_fastq")
         .unwrap()
@@ -112,6 +113,7 @@ fn run_on(input: &str, extra: &[&str]) -> (assert_cmd::assert::Assert, TempDir) 
     fs::write(&in_path, input).unwrap();
     let assert = Command::cargo_bin("dedup_ont_fastq")
         .unwrap()
+        .current_dir(dir.path())
         .arg(&in_path)
         .arg(dir.path().join("out.fastq"))
         .args(extra)
@@ -166,9 +168,43 @@ fn gz_output_is_compressed() {
 }
 
 #[test]
-fn rejects_invalid_error_fraction() {
-    for value in ["inf", "NaN", "-0.1", "1.5"] {
-        run_on("", &["--max-error-frac", value]).0.failure();
+fn cli_exposes_user_decisions() {
+    let help = Command::cargo_bin("dedup_ont_fastq")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success();
+    let text = String::from_utf8_lossy(&help.get_output().stdout);
+    for flag in [
+        "--assignments",
+        "--protect-divergence",
+        "--noise-scale",
+        "--no-rc",
+        "--max-end-offset",
+        "--assumed-error-rate",
+    ] {
+        assert!(text.contains(flag), "{text}");
+    }
+    assert!(text.contains("regular file"), "{text}");
+    assert!(text.contains("--noise-scale <POSITIVE>"), "{text}");
+    assert!(
+        text.contains("Multiplier on the quality-derived noise estimate [default: 1]"),
+        "{text}"
+    );
+    // Tuning constants stay library-only; the CLI exposes user decisions.
+    for removed in [
+        "--end-check-len",
+        "--max-end-errors",
+        "--max-error-frac",
+        "--quality-calibration",
+        "--quality-error-floor",
+        "--pair-distance-cv",
+        "--seed-drift-frac",
+        "--kmer-len",
+        "--window-len",
+        "--num-windows",
+    ] {
+        assert!(!text.contains(removed), "{removed} in help: {text}");
     }
 }
 
@@ -242,7 +278,7 @@ fn rejects_output_hard_linked_to_input() {
 }
 
 #[test]
-fn detects_gzip_by_content_and_applies_tuning_flags() {
+fn detects_gzip_by_content_and_respects_endpoint_tolerance() {
     // Two reads whose starts differ by 20 bases: separate by default,
     // merged once the endpoint tolerance covers the shift. The input is
     // gzip-compressed despite its plain .fastq name.
@@ -254,9 +290,7 @@ fn detects_gzip_by_content_and_applies_tuning_flags() {
     ]);
     let dir = TempDir::new().unwrap();
     let in_path = dir.path().join("in.fastq");
-    let mut gz = GzEncoder::new(File::create(&in_path).unwrap(), Compression::default());
-    gz.write_all(input.as_bytes()).unwrap();
-    gz.finish().unwrap();
+    fs::write(&in_path, gzip(input.as_bytes())).unwrap();
     let count = |extra: &[&str]| {
         let out = dir.path().join("out.fastq");
         Command::cargo_bin("dedup_ont_fastq")
@@ -273,10 +307,9 @@ fn detects_gzip_by_content_and_applies_tuning_flags() {
 }
 
 #[test]
-fn rejects_invalid_seed_parameters_and_names_bad_records() {
-    run_on("", &["--kmer-len", "40"]).0.failure();
+fn names_bad_records() {
     let (assert, _dir) = run_on("@r0\nACGT\n+\nIIII\n@r1\nACGT\n+\nII\n", &[]);
-    let stderr = String::from_utf8(assert.failure().get_output().stderr.clone()).unwrap();
+    let stderr = stderr_of(&assert.failure()).into_owned();
     assert!(stderr.contains("FASTQ record 2"), "{stderr}");
     assert!(stderr.contains("in.fastq"), "{stderr}");
 }
@@ -317,9 +350,157 @@ fn unreadable_input_error_names_the_path() {
         .arg(dir.path().join("out.fastq"))
         .assert()
         .failure();
-    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let stderr = stderr_of(&assert);
     assert!(
         stderr.contains(&dir.path().display().to_string()),
         "{stderr}"
     );
+}
+
+#[test]
+fn validates_statistical_parameters_and_phred_bytes() {
+    for (flag, bad, message) in [
+        ("--protect-divergence", "NaN", "protect_divergence"),
+        ("--protect-divergence", "inf", "protect_divergence"),
+        ("--protect-divergence", "0", "protect_divergence"),
+        ("--protect-divergence", "1.1", "protect_divergence"),
+        ("--assumed-error-rate", "NaN", "assumed_error_rate"),
+        ("--assumed-error-rate", "inf", "assumed_error_rate"),
+        ("--assumed-error-rate", "1.1", "assumed_error_rate"),
+        ("--noise-scale", "auto", "expected a finite positive number"),
+        ("--noise-scale", "0", "expected a finite positive number"),
+        ("--noise-scale", "NaN", "expected a finite positive number"),
+        ("--noise-scale", "inf", "expected a finite positive number"),
+        ("--noise-scale", "oops", "expected a finite positive number"),
+    ] {
+        run_on("", &[&format!("{flag}={bad}")])
+            .0
+            .failure()
+            .stderr(predicates::str::contains(message));
+    }
+    for flag in [
+        "--protect-divergence",
+        "--noise-scale",
+        "--assumed-error-rate",
+    ] {
+        run_on("", &[&format!("{flag}=-0.1")]).0.failure();
+    }
+    // Absurd multipliers would overflow the noise estimate and silently stop
+    // all merging, so they are rejected.
+    run_on("", &["--noise-scale", "1000"]).0.failure();
+    // Constant invalid qualities are input errors, not unavailable placeholders.
+    run_on("@r0\nACGT\n+\n    \n", &[]).0.failure();
+    run_on("", &["--assumed-error-rate", "0"]).0.success();
+}
+
+#[test]
+fn accepts_numeric_noise_scale() {
+    let input = "@r0\nACGT\n+\nIJIJ\n";
+    for value in ["0.25", "1", "2.5", "6"] {
+        let (assert, dir) = run_on(input, &["--noise-scale", value]);
+        assert.success();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("out.fastq")).unwrap(),
+            input
+        );
+    }
+}
+
+#[test]
+fn assignments_only_streams_files_and_plain_or_gzip_stdin() {
+    let mut rng = StdRng::seed_from_u64(811);
+    let (a, b) = (random_seq(120, &mut rng), random_seq(120, &mut rng));
+    for count in [4, 20_003] {
+        let mut input = fastq(&[("first", &a, '5'), ("other", &b, '5')]);
+        for idx in 2..count {
+            input.push_str(&fastq(&[(
+                "copy",
+                &a,
+                if idx == count - 1 { '?' } else { '5' },
+            )]));
+        }
+        let expected = format!(
+            "read_idx\texemplar_idx\n{}",
+            (0..count)
+                .map(|idx| format!("{idx}\t{}\n", if idx == 1 { 1 } else { count - 1 }))
+                .collect::<String>()
+        );
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("in.fastq");
+        fs::write(&path, &input).unwrap();
+        let compressed = gzip(input.as_bytes());
+        for fixed in [false, true] {
+            for (source, payload) in [
+                (path.as_path(), None),
+                (Path::new("-"), Some(input.as_bytes())),
+                (Path::new("/dev/stdin"), Some(input.as_bytes())),
+                (Path::new("-"), Some(compressed.as_slice())),
+                (Path::new("/dev/stdin"), Some(compressed.as_slice())),
+            ] {
+                let assignments = dir.path().join("assign.tsv");
+                let mut cmd = Command::cargo_bin("dedup_ont_fastq").unwrap();
+                cmd.arg(source).arg("--assignments").arg(&assignments);
+                if fixed {
+                    cmd.args(["--noise-scale", "1"]);
+                }
+                if let Some(payload) = payload {
+                    cmd.write_stdin(payload);
+                }
+                cmd.assert().success();
+                assert_eq!(
+                    fs::read_to_string(&assignments).unwrap(),
+                    expected,
+                    "{count}, {fixed}, {source:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn rejects_stdin_with_fastq_output_before_reading_and_requires_a_result() {
+    let dir = TempDir::new().unwrap();
+    let output = dir.path().join("out.fastq");
+    for (source, message) in [
+        ("-", "stdin requires --assignments without OUTPUT"),
+        ("/dev/stdin", "regular file"),
+    ] {
+        Command::cargo_bin("dedup_ont_fastq")
+            .unwrap()
+            .arg(source)
+            .arg(&output)
+            .write_stdin("malformed input")
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(message))
+            .stderr(predicates::str::contains("--assignments"));
+    }
+    assert!(!output.exists());
+    Command::cargo_bin("dedup_ont_fastq")
+        .unwrap()
+        .arg("-")
+        .write_stdin("malformed input")
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("--assignments"));
+}
+
+#[test]
+fn rejects_assignments_that_overwrite_redirected_stdin() {
+    let dir = TempDir::new().unwrap();
+    let input = dir.path().join("in.fastq");
+    let contents = "@r0\nACGT\n+\nIIII\n";
+    fs::write(&input, contents).unwrap();
+    for source in ["-", "/dev/stdin"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_dedup_ont_fastq"))
+            .arg(source)
+            .arg("--assignments")
+            .arg(&input)
+            .stdin(File::open(&input).unwrap())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("must be different files"));
+        assert_eq!(fs::read_to_string(&input).unwrap(), contents);
+    }
 }

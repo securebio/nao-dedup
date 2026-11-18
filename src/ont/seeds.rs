@@ -233,13 +233,9 @@ pub(crate) fn end_seeds(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ont::reverse_complement;
+    use crate::ont::{reverse_complement, test_util::random_seq};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
-
-    fn random_seq(len: usize, rng: &mut StdRng) -> Vec<u8> {
-        (0..len).map(|_| b"ACGT"[rng.gen_range(0..4)]).collect()
-    }
 
     fn seeds(seq: &[u8], params: &OntMinimizerParams) -> EndSeeds {
         end_seeds(seq, params, &mut Vec::new())

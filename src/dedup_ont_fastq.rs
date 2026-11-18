@@ -1,31 +1,31 @@
 //! Deduplicate a single-end ONT FASTQ file.
 //!
-//! Two passes, like `dedup_interleaved_fastq`: the first builds clusters, the
-//! second writes each cluster's exemplar record unchanged.
+//! Stream reads into clusters, then optionally reread to write exemplar records.
 
 use clap::Parser;
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
-use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams};
+use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams, validate_quality};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "dedup_ont_fastq")]
 #[command(about = "Deduplicate single-end ONT FASTQ files", long_about = None)]
 struct Cli {
-    /// Input FASTQ file (gzip-compressed or plain; must be a regular file
-    /// since it is read twice)
+    /// Input FASTQ (plain or gzip), or - for stdin. OUTPUT requires a regular file;
+    /// streams require --assignments without OUTPUT
     #[arg(value_name = "INPUT")]
     input: PathBuf,
 
-    /// Output FASTQ file (exemplars only); gzip-compressed if it ends in .gz
+    /// Output FASTQ file (exemplars only); gzip-compressed if it ends in .gz.
+    /// Omit for assignments only; stdin requires --assignments without OUTPUT
     #[arg(value_name = "OUTPUT")]
-    output: PathBuf,
+    output: Option<PathBuf>,
 
-    /// Also write each read's exemplar as TSV (read_idx, exemplar_idx;
+    /// Write each read's exemplar as TSV (read_idx, exemplar_idx;
     /// 0-based positions in the input)
     #[arg(long, value_name = "PATH")]
     assignments: Option<PathBuf>,
@@ -34,41 +34,25 @@ struct Cli {
     #[arg(long, default_value_t = OntDedupParams::default().max_end_offset)]
     max_end_offset: usize,
 
-    /// Bases inward from each end used for the endpoint check
-    #[arg(long, default_value_t = OntDedupParams::default().end_check_len)]
-    end_check_len: usize,
-
-    /// Edits allowed within each endpoint check window
-    #[arg(long, default_value_t = OntDedupParams::default().max_end_errors)]
-    max_end_errors: usize,
-
-    /// Whole-read edit distance allowed, as a fraction of the longer read
-    #[arg(long, default_value_t = OntDedupParams::default().max_error_frac, value_parser = parse_fraction)]
-    max_error_frac: f64,
+    /// Strain divergence against which to protect
+    #[arg(long, default_value_t = OntDedupParams::default().protect_divergence)]
+    protect_divergence: f64,
+    /// Multiplier on the quality-derived noise estimate
+    #[arg(long, default_value_t = OntDedupParams::default().noise_scale, value_name = "POSITIVE", value_parser = parse_noise_scale)]
+    noise_scale: f64,
+    /// Expected error rate for empty or exactly constant qualities
+    #[arg(long, default_value_t = OntDedupParams::default().assumed_error_rate)]
+    assumed_error_rate: f64,
 
     /// Only match reads in the same orientation (for directional libraries)
     #[arg(long)]
     no_rc: bool,
-
-    /// K-mer length for seeds
-    #[arg(long, default_value_t = OntMinimizerParams::default().kmer_len)]
-    kmer_len: usize,
-
-    /// Seed window length
-    #[arg(long, default_value_t = OntMinimizerParams::default().window_len)]
-    window_len: usize,
-
-    /// Seed windows at each end of the read
-    #[arg(long, default_value_t = OntMinimizerParams::default().num_windows)]
-    num_windows: usize,
 }
 
-fn parse_fraction(s: &str) -> Result<f64, String> {
-    let value: f64 = s.parse().map_err(|e| format!("{e}"))?;
-    if (0.0..=1.0).contains(&value) {
-        Ok(value)
-    } else {
-        Err(format!("must be between 0 and 1, got {s}"))
+fn parse_noise_scale(value: &str) -> Result<f64, String> {
+    match value.parse::<f64>() {
+        Ok(n) if n.is_finite() && n > 0.0 => Ok(n),
+        _ => Err("expected a finite positive number".into()),
     }
 }
 
@@ -86,6 +70,7 @@ struct FastqRecord {
 struct FastqReader<R: BufRead> {
     reader: R,
     records_read: usize,
+    check_quality: bool,
 }
 
 impl<R: BufRead> FastqReader<R> {
@@ -93,6 +78,7 @@ impl<R: BufRead> FastqReader<R> {
         Self {
             reader,
             records_read: 0,
+            check_quality: true,
         }
     }
 
@@ -131,6 +117,11 @@ impl<R: BufRead> FastqReader<R> {
         if record.sequence.len() != record.quality.len() {
             return Err(invalid("FASTQ sequence and quality lengths differ"));
         }
+        if self.check_quality && !validate_quality(&record.quality) {
+            return Err(invalid(
+                "FASTQ quality bytes must be valid Phred+33 (33..=126)",
+            ));
+        }
         Ok(true)
     }
 }
@@ -151,17 +142,25 @@ fn read_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<bool> 
     Ok(true)
 }
 
-/// Open a FASTQ file, decompressing it if it starts with the gzip magic bytes.
+/// Open a FASTQ file or stdin, detecting gzip by its magic bytes.
 fn open_fastq(path: &Path) -> io::Result<FastqReader<Box<dyn BufRead>>> {
-    let mut file = BufReader::new(File::open(path).map_err(|e| with_path(e, path))?);
-    let gzipped = file
-        .fill_buf()
-        .map_err(|e| with_path(e, path))?
-        .starts_with(&[0x1f, 0x8b]);
-    let reader: Box<dyn BufRead> = if gzipped {
-        Box::new(BufReader::new(MultiGzDecoder::new(file)))
+    let source: Box<dyn io::Read> = if path == Path::new("-") {
+        Box::new(io::stdin())
     } else {
-        Box::new(file)
+        Box::new(File::open(path).map_err(|e| with_path(e, path))?)
+    };
+    fastq_reader(source).map_err(|e| with_path(e, path))
+}
+
+fn fastq_reader(mut source: impl Read + 'static) -> io::Result<FastqReader<Box<dyn BufRead>>> {
+    let mut prefix = Vec::with_capacity(2);
+    source.by_ref().take(2).read_to_end(&mut prefix)?;
+    let gzipped = prefix == [0x1f, 0x8b];
+    let source = io::Cursor::new(prefix).chain(source);
+    let reader: Box<dyn BufRead> = if gzipped {
+        Box::new(BufReader::new(MultiGzDecoder::new(source)))
+    } else {
+        Box::new(BufReader::new(source))
     };
     Ok(FastqReader::new(reader))
 }
@@ -232,8 +231,14 @@ fn check_distinct_paths(cli: &Cli) -> io::Result<()> {
             Err(e) => Err(with_path(e, path)),
         }
     };
-    let mut paths = vec![&cli.input, &cli.output];
-    paths.extend(&cli.assignments);
+    let input = if cli.input == Path::new("-") {
+        Path::new("/dev/stdin")
+    } else {
+        cli.input.as_path()
+    };
+    let mut paths = vec![input];
+    paths.extend(cli.output.as_deref());
+    paths.extend(cli.assignments.as_deref());
     let ids = paths
         .iter()
         .map(|p| identify(p))
@@ -267,18 +272,33 @@ fn main() -> std::process::ExitCode {
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let dedup_params = OntDedupParams {
         max_end_offset: cli.max_end_offset,
-        end_check_len: cli.end_check_len,
-        max_end_errors: cli.max_end_errors,
-        max_error_frac: cli.max_error_frac,
+        protect_divergence: cli.protect_divergence,
+        noise_scale: cli.noise_scale,
+        assumed_error_rate: cli.assumed_error_rate,
         rc_tolerant: !cli.no_rc,
+        ..Default::default()
     };
-    let minimizer_params = OntMinimizerParams::new(cli.kmer_len, cli.window_len, cli.num_windows)?;
+    dedup_params.validate()?;
+    let minimizer_params = OntMinimizerParams::default();
+    if cli.input == Path::new("-") && (cli.output.is_some() || cli.assignments.is_none()) {
+        return Err("stdin requires --assignments without OUTPUT".into());
+    }
+    if cli.output.is_none() && cli.assignments.is_none() {
+        return Err("provide OUTPUT or --assignments".into());
+    }
+    if cli.output.is_some()
+        && !std::fs::metadata(&cli.input)
+            .map_err(|e| with_path(e, &cli.input))?
+            .is_file()
+    {
+        return Err(format!("{}: OUTPUT requires a regular file input; use --assignments without OUTPUT for streams", cli.input.display()).into());
+    }
     check_distinct_paths(&cli)?;
     let mut record = FastqRecord::default();
+    let mut reader = open_fastq(&cli.input)?;
 
     eprintln!("Pass 1: Building deduplication index...");
     let mut ctx = OntDedupContext::new(dedup_params, minimizer_params);
-    let mut reader = open_fastq(&cli.input)?;
     let mut n_reads = 0;
     while reader
         .next_into(&mut record)
@@ -298,6 +318,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("  Reads without seeds: {}", stats.unseeded_reads);
     eprintln!("  Postings visited: {}", stats.postings_visited);
     eprintln!("  Candidate comparisons: {}", stats.candidates_compared);
+    eprintln!(
+        "  Reads without usable qualities: {}",
+        stats.unavailable_quality_reads
+    );
+    eprintln!(
+        "  Comparisons using assumed error rate: {}",
+        stats.assumed_rate_comparisons
+    );
     if total > 0 {
         eprintln!(
             "  Deduplication rate: {:.2}%",
@@ -319,17 +347,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         write().map_err(|e| with_path(e, path))?;
     }
 
+    let Some(output_path) = &cli.output else {
+        eprintln!("Done!");
+        return Ok(());
+    };
     eprintln!("Pass 2: Writing exemplars to output...");
-    let exemplars = ctx.get_exemplar_indices();
     let mut reader = open_fastq(&cli.input)?;
-    let mut output = Output::create(&cli.output).map_err(|e| with_path(e, &cli.output))?;
+    reader.check_quality = false;
+    let mut output = Output::create(output_path).map_err(|e| with_path(e, output_path))?;
     let writer = output.writer();
     let (mut idx, mut written) = (0, 0);
     while reader
         .next_into(&mut record)
         .map_err(|e| with_path(e, &cli.input))?
     {
-        if exemplars.contains(&idx) {
+        if idx < total && ctx.get_exemplar_index(idx) == idx {
             for line in [
                 &record.header,
                 &record.sequence,
@@ -339,7 +371,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 writer
                     .write_all(line)
                     .and_then(|()| writer.write_all(b"\n"))
-                    .map_err(|e| with_path(e, &cli.output))?;
+                    .map_err(|e| with_path(e, output_path))?;
             }
             written += 1;
         }
@@ -348,8 +380,49 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if idx != n_reads {
         return Err(format!("input changed between passes ({n_reads} then {idx} reads)").into());
     }
-    output.finish().map_err(|e| with_path(e, &cli.output))?;
+    output.finish().map_err(|e| with_path(e, output_path))?;
     eprintln!("  Wrote {written} exemplar reads");
     eprintln!("Done!");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct ShortReads(io::Cursor<Vec<u8>>);
+
+    impl Read for ShortReads {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let len = buffer.len().min(1);
+            self.0.read(&mut buffer[..len])
+        }
+    }
+
+    #[test]
+    fn gzip_detection_handles_short_reads_and_preserves_the_prefix() {
+        let input = b"@r0\nACGT\n+\nIJIJ\n";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(input).unwrap();
+        for bytes in [input.to_vec(), encoder.finish().unwrap()] {
+            let mut reader = fastq_reader(ShortReads(io::Cursor::new(bytes))).unwrap();
+            let mut record = FastqRecord::default();
+            assert!(reader.next_into(&mut record).unwrap());
+            assert_eq!(record.sequence, b"ACGT");
+            assert_eq!(record.quality, b"IJIJ");
+            assert!(!reader.next_into(&mut record).unwrap());
+        }
+        let mut record = FastqRecord::default();
+        assert!(
+            !fastq_reader(io::empty())
+                .unwrap()
+                .next_into(&mut record)
+                .unwrap()
+        );
+        let error = fastq_reader(io::Cursor::new(b"@"))
+            .unwrap()
+            .next_into(&mut record)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+    }
 }

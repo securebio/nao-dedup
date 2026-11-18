@@ -76,8 +76,9 @@ impl LeaderStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ont::test_util::random_seq;
+    use rand::SeedableRng;
     use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
 
     #[test]
     fn round_trips_packed_and_verbatim_leaders() {
@@ -85,11 +86,7 @@ mod tests {
         let mut store = LeaderStore::default();
         let mut seqs = Vec::new();
         for len in [0, 1, 3, 4, 5, 17, 1000] {
-            seqs.push(
-                (0..len)
-                    .map(|_| b"ACGT"[rng.gen_range(0..4)])
-                    .collect::<Vec<_>>(),
-            );
+            seqs.push(random_seq(len, &mut rng));
         }
         seqs.push(b"ACGTNACGT".to_vec());
         seqs.push(b"GATTACA".to_vec());

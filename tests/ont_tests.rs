@@ -1,24 +1,10 @@
+mod common;
 use clap::Parser;
+use common::random_seq;
 use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams};
-use ont_sim::{SimConfig, evaluate, simulate};
+use ont_sim::{SimConfig, evaluate, reverse_complement, simulate};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-
-fn random_seq(len: usize, rng: &mut StdRng) -> Vec<u8> {
-    (0..len).map(|_| b"ACGT"[rng.gen_range(0..4)]).collect()
-}
-
-fn reverse_complement(seq: &[u8]) -> Vec<u8> {
-    seq.iter()
-        .rev()
-        .map(|b| match b {
-            b'A' => b'T',
-            b'T' => b'A',
-            b'C' => b'G',
-            _ => b'C',
-        })
-        .collect()
-}
 
 fn qual(len: usize, q: u8) -> Vec<u8> {
     vec![q + 33; len]
@@ -101,18 +87,23 @@ fn with_substitutions(seq: &[u8], range: std::ops::Range<usize>) -> Vec<u8> {
 
 #[test]
 fn members_are_judged_against_the_fixed_leader() {
-    // 1000 bp with a 4% budget allows 40 edits. A and C each differ from B
-    // by 25 substitutions in different regions, so A~B and B~C but not A~C.
+    // At 1000 bp with constant qualities (assumed 1% error per read) and 1%
+    // protected divergence, the cutoff lies between 10 and 20 edits. A and C
+    // each differ from B by 10 edits, but A and C differ by 20.
+    let params = OntDedupParams {
+        protect_divergence: 0.01,
+        ..Default::default()
+    };
     let mut rng = StdRng::seed_from_u64(5);
     let b = random_seq(1000, &mut rng);
-    let a = with_substitutions(&b, 200..450);
-    let c = with_substitutions(&b, 550..800);
+    let a = with_substitutions(&b, 200..300);
+    let c = with_substitutions(&b, 550..650);
     let reads = vec![
         (a.clone(), qual(1000, 10)), // leader of the first cluster
         (b.clone(), qual(1000, 30)), // joins A and becomes its exemplar
         (c.clone(), qual(1000, 20)), // fails against leader A: new cluster
     ];
-    assert_eq!(run(&reads, OntDedupParams::default()), [1, 1, 2]);
+    assert_eq!(run(&reads, params.clone()), [1, 1, 2]);
 
     // A read matching two existing leaders joins the earlier one; the
     // clusters stay separate.
@@ -121,7 +112,7 @@ fn members_are_judged_against_the_fixed_leader() {
         (c, qual(1000, 20)),
         (b, qual(1000, 10)),
     ];
-    assert_eq!(run(&reads, OntDedupParams::default()), [0, 1, 0]);
+    assert_eq!(run(&reads, params.clone()), [0, 1, 0]);
 }
 
 #[test]
@@ -168,7 +159,7 @@ fn quality_outranks_length() {
     let params = OntDedupParams {
         max_end_offset: 100,
         max_end_errors: 0,
-        ..Default::default()
+        ..cap_only(0.12)
     };
     let mut long_qual = qual(3100, 30);
     long_qual[0] = b'!'; // mean quality just under 30
@@ -218,7 +209,7 @@ fn exemplar_query_before_finalize_panics() {
     ctx.get_exemplar_index(0);
 }
 
-/// Simulate with illustrative error rates (not a model of any instrument).
+/// Simulate reads with substitutions and indels.
 fn simulated(extra: &[&str]) -> ont_sim::Simulation {
     #[derive(Parser)]
     struct Args {
@@ -254,9 +245,18 @@ fn evaluate_dedup(sim: &ont_sim::Simulation, params: OntDedupParams) -> ont_sim:
     evaluate(&truth, &assignments).unwrap()
 }
 
+// Isolate seeds and endpoint matching with a cap-only whole-read budget.
+fn cap_only(max_error_frac: f64) -> OntDedupParams {
+    OntDedupParams {
+        protect_divergence: 1.0,
+        max_error_frac,
+        ..Default::default()
+    }
+}
+
 #[test]
 fn simulated_uniform_endpoints() {
-    let result = evaluate_dedup(&simulated(&[]), OntDedupParams::default());
+    let result = evaluate_dedup(&simulated(&[]), cap_only(0.04));
     let (precision, recall) = (
         result.molecule.precision().unwrap(),
         result.molecule.recall().unwrap(),
@@ -278,13 +278,39 @@ fn simulated_nearby_endpoints() {
     ]);
     let strict = OntDedupParams {
         max_end_offset: 0,
-        ..Default::default()
+        ..cap_only(0.04)
     };
     let result = evaluate_dedup(&sim, strict);
     let precision = result.identifiability.precision().unwrap();
     let recall = result.identifiability.recall().unwrap();
     assert!(precision > 0.98, "precision {precision}");
     assert!(recall > 0.9, "recall {recall}");
+}
+
+#[test]
+fn default_params_recall_on_quality_conditioned_reads() {
+    let sim = simulated(&[
+        "--quality-conditioned",
+        "--error-median",
+        "0.01",
+        "--error-sigma",
+        "0.2",
+        "--local-q-sigma",
+        "1.5",
+        "--miscalibration",
+        "1",
+        "--latent-sigma",
+        "0.1",
+        "--len-min",
+        "2000",
+        "--len-max",
+        "3000",
+        "--genome-len",
+        "1000000",
+    ]);
+    let result = evaluate_dedup(&sim, OntDedupParams::default());
+    let recall = result.molecule.recall().unwrap();
+    assert!(recall > 0.95, "recall {recall}");
 }
 
 #[test]
@@ -298,5 +324,124 @@ fn deterministic() {
     assert_eq!(
         run(&reads, OntDedupParams::default()),
         run(&reads, OntDedupParams::default())
+    );
+}
+
+#[test]
+fn unavailable_qualities_are_counted_and_use_protected_assumed_noise() {
+    let mut rng = StdRng::seed_from_u64(43);
+    let seq = random_seq(1000, &mut rng);
+    let mut ctx = OntDedupContext::new(OntDedupParams::default(), OntMinimizerParams::default());
+    ctx.process_read_by_index(0, &seq, &[]);
+    ctx.process_read_by_index(1, &seq, &qual(1000, 20));
+    let mut varied = qual(1000, 20);
+    varied[0] += 1;
+    ctx.process_read_by_index(2, &seq, &varied);
+    assert_eq!(ctx.detailed_stats().unavailable_quality_reads, 2);
+    assert_eq!(ctx.detailed_stats().assumed_rate_comparisons, 2);
+    ctx.finalize();
+    assert_eq!(ctx.stats(), (3, 1));
+    // At 50 bp even an identical pair lacks enough divergence evidence.
+    let mut ctx = OntDedupContext::new(OntDedupParams::default(), OntMinimizerParams::default());
+    ctx.process_read_by_index(0, &seq[..50], &[]);
+    ctx.process_read_by_index(1, &seq[..50], &[]);
+    ctx.finalize();
+    assert_eq!(ctx.stats(), (2, 2));
+}
+
+#[test]
+fn leader_quality_summary_survives_exemplar_replacement() {
+    let mut rng = StdRng::seed_from_u64(44);
+    let seq = random_seq(2000, &mut rng);
+    let altered = with_substitutions(&seq, 500..700);
+    let mut moderate = qual(2000, 20);
+    moderate[0] += 1;
+    let mut clean = qual(2000, 40);
+    clean[0] += 1;
+    // Clean+clean would reject twenty edits; leader+clean allows them.
+    let params = OntDedupParams {
+        protect_divergence: 0.01,
+        ..Default::default()
+    };
+    let mut ctx = OntDedupContext::new(params.clone(), OntMinimizerParams::default());
+    ctx.process_read_by_index(0, &seq, &moderate);
+    ctx.process_read_by_index(1, &seq, &clean);
+    ctx.process_read_by_index(2, &altered, &clean);
+    assert_eq!(ctx.detailed_stats().unavailable_quality_reads, 0);
+    assert_eq!(ctx.detailed_stats().assumed_rate_comparisons, 0);
+    ctx.finalize();
+    assert_eq!(ctx.stats(), (3, 1));
+    assert_eq!(ctx.get_exemplar_index(2), 1);
+    assert_ne!(
+        run(&[(seq, clean.clone()), (altered, clean)], params),
+        [0, 0]
+    );
+}
+
+#[test]
+fn quality_conditioned_duplicate_recall_and_protected_near_misses() {
+    use ont_sim::{QualityConfig, add_quality_errors};
+    let model = |median| QualityConfig::enabled(median, 0.15, 1.5, 1.0, 0.1);
+    let mut rng = StdRng::seed_from_u64(9281);
+    let params = OntDedupParams {
+        protect_divergence: 0.01,
+        quality_calibration: 1.0,
+        quality_error_floor: 0.0,
+        ..Default::default()
+    };
+    let trials = 150;
+    let mut duplicates = 0;
+    // Assess both fixed variant counts and independent random substitutions,
+    // unequal accuracies, arrival orders, and opposite-strand comparisons.
+    for fixed in [false, true] {
+        let mut false_merges = 0;
+        for trial in 0..trials {
+            let source = random_seq(3000, &mut rng);
+            let mut variant = source.clone();
+            // Strains 1.5x the protected divergence apart: the nominal 5% applies
+            // exactly at the protected divergence, and merges fall off quickly
+            // beyond it.
+            let positions: Vec<usize> = if fixed {
+                use rand::seq::index::sample;
+                sample(&mut rng, source.len(), 45).into_vec()
+            } else {
+                (0..source.len()).filter(|_| rng.gen_bool(0.015)).collect()
+            };
+            for pos in positions {
+                variant[pos] = if variant[pos] == b'A' { b'C' } else { b'A' };
+            }
+            let (a, qa, _) =
+                add_quality_errors(&source, &model(0.001), [0.4, 0.3, 0.3], 1.0, &mut rng);
+            let (mut b, mut qb, _) =
+                add_quality_errors(&source, &model(0.002), [0.4, 0.3, 0.3], 1.0, &mut rng);
+            let (mut near, mut qn, _) =
+                add_quality_errors(&variant, &model(0.002), [0.4, 0.3, 0.3], 1.0, &mut rng);
+            if trial % 2 == 0 {
+                b = reverse_complement(&b);
+                qb.reverse();
+                near = reverse_complement(&near);
+                qn.reverse();
+            }
+            let mut dup_reads = vec![(a.clone(), qa.clone()), (b, qb)];
+            let mut near_reads = vec![(a, qa), (near, qn)];
+            if trial % 3 == 0 {
+                dup_reads.reverse();
+                near_reads.reverse();
+            }
+            let assignments = run(&dup_reads, params.clone());
+            duplicates += usize::from(assignments[0] == assignments[1]);
+            let assignments = run(&near_reads, params.clone());
+            false_merges += usize::from(assignments[0] == assignments[1]);
+        }
+        // With n=150, <=2 merges has one-sided 95% Wilson bound below 5%.
+        assert!(
+            false_merges <= 2,
+            "fixed={fixed}: {false_merges}/{trials} false merges"
+        );
+    }
+    assert!(
+        duplicates as f64 / (2 * trials) as f64 > 0.9,
+        "{duplicates}/{} duplicates merged",
+        2 * trials
     );
 }

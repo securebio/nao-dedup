@@ -5,6 +5,8 @@
 //!   cargo run --release --example ont_scale -- --reads 10000000 \
 //!     --sub-rate <P> --ins-rate <P> --del-rate <P>
 //!
+//! Constant qualities exercise the assumed-error-rate path.
+//!
 //! Error rates are required and illustrative. Molecules are drawn uniformly
 //! over the genomes, each family gets a geometric number of reads, and reads
 //! arrive in random order. Errors are placed by geometric skipping, so
@@ -13,8 +15,11 @@
 //! advance the template, so insertions per template base come out slightly
 //! higher than `--ins-rate` (rate / (1 - rate)).
 
+#[path = "common/dedup.rs"]
+mod dedup;
+
 use clap::Parser;
-use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams};
+use nao_dedup::ont::{OntDedupContext, OntMinimizerParams};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -22,6 +27,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 struct Args {
+    #[command(flatten)]
+    dedup: dedup::DedupArgs,
     /// Total reads to generate.
     #[arg(long, default_value_t = 1_000_000)]
     reads: usize,
@@ -117,6 +124,7 @@ fn validate(args: &Args) -> Result<(), String> {
     if args.len_min > args.genome_len {
         return Err("--len-min must not exceed --genome-len".into());
     }
+    args.dedup.params().validate()?;
     Ok(())
 }
 
@@ -155,7 +163,7 @@ fn main() {
     read_molecule.shuffle(&mut rng);
     let setup_rss = peak_rss_mb();
 
-    let mut ctx = OntDedupContext::new(OntDedupParams::default(), OntMinimizerParams::default());
+    let mut ctx = OntDedupContext::new(args.dedup.params(), OntMinimizerParams::default());
     let (mut read, mut qual) = (Vec::new(), Vec::new());
     let mut dedup_time = Duration::ZERO;
     let started = Instant::now();
@@ -185,7 +193,7 @@ fn main() {
     let stats = ctx.detailed_stats();
     println!(
         "reads={} molecules={} clusters={} dedup_s={:.1} us_per_read={:.1} total_s={:.1} \
-         setup_rss_mb={setup_rss:.0} peak_rss_mb={:.0} postings_per_read={:.0} candidates_per_read={:.2}",
+         setup_rss_mb={setup_rss:.0} peak_rss_mb={:.0} postings_per_read={:.0} candidates_per_read={:.2} unavailable_quality_reads={} assumed_rate_comparisons={}",
         args.reads,
         molecules.len(),
         stats.clusters,
@@ -195,5 +203,7 @@ fn main() {
         peak_rss_mb(),
         stats.postings_visited as f64 / args.reads as f64,
         stats.candidates_compared as f64 / args.reads as f64,
+        stats.unavailable_quality_reads,
+        stats.assumed_rate_comparisons,
     );
 }
