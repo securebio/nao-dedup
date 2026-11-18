@@ -6,6 +6,25 @@ Oxford Nanopore reads. Two reads must share both fragment endpoints within
 Reverse-complement matching is enabled by default; directional libraries can
 turn it off. Truncated copies sharing only one endpoint are outside this definition.
 
+Endpoints are the main evidence. Two independent molecules from the same
+genome region can be nearly identical in sequence. A tight endpoint
+tolerance is what keeps them apart. At deep coverage of a short genome,
+independent molecules can share endpoints by chance, so groups are operational
+("same endpoints and sequence"), not guaranteed molecular counts.
+
+## Read ends
+
+Raw read ends are compared as they are. Some ONT reads end in sequence that
+isn't part of the template's forward strand, most notably foldback reads,
+which continue into the reverse complement of the molecule. Reads are not
+trimmed for this. If a foldback forms before PCR, all copies of the
+molecule carry it, and they match without trimming; trimming each read
+independently would only add jitter at the cut. Libraries where foldbacks
+arise independently in each read would need a trimming step.
+
+Single-base homopolymer k-mers are never used as seeds, so poly-A/T tails
+don't create giant buckets.
+
 ## Clustering and comparison
 
 Reads stream into greedy clusters. Each cluster's first read is its immutable
@@ -47,13 +66,25 @@ Quality-predicted errors sum `10^(-Q/10)` over bases; library parameters
 qualities instead contribute `assumed_error_rate × length` (default rate 0.01),
 without quality terms or `noise_scale`. Malformed nonempty qualities are errors.
 
+`quality_calibration = 1.2`, `quality_error_floor = 0.002`,
+`pair_distance_cv = 0.25` and the 5% tail cutoff
+(`pair_tail_probability = 0.05`) are tuned engineering defaults. Library
+callers can override all four; the CLI also exposes `noise_scale` for adjusting
+the quality-derived noise contribution. `noise_scale` stays fixed during a run;
+there is no automatic calibration.
+
 Pair noise sums the two reads' contributions. A pair from strains
 `protect_divergence` apart has mean distance
 `mu = noise + protect_divergence × shorter_length`. `T` is the largest integer
-distance with lower-tail probability below 5% under a negative binomial with
-that mean and variance `mu + (pair_distance_cv × noise)^2` (CV default 0.25).
+distance with lower-tail probability below `pair_tail_probability` under a
+negative binomial with that mean and variance
+`mu + (pair_distance_cv × noise)^2` (CV default 0.25).
 A negative budget rejects even identical reads. Longer reads give more evidence
 about strain differences; short or noisy reads can remain unmerged.
+
+The default 5% is per comparison under the working model, not a bound on final
+cluster contamination. A read can encounter multiple leaders, and greedy
+clustering and model mismatch can change the aggregate false-merge rate.
 
 ## CLI and storage
 
@@ -75,15 +106,49 @@ a 4-byte expected-error summary. Assignments use one `u32` per read. The seed
 index maps hashes to offset-sorted 8-byte postings (leader, offset, end), up to
 16 postings per leader by default. A bucket holds one posting inline.
 
-## Limitations and evaluation tools
+In synthetic tests with reads of 0.5–4.5 kb (mean ~2.5 kb), peak memory was
+about 0.9 KB per leader when leaders shared seeds and about 1.4 KB when every
+seed was distinct. Packed sequence costs a quarter byte per base, so longer
+reads cost proportionally more. At that read length with shared seeds, even
+50M unique reads fit in 64 GB. `ont_scale` streams synthetic reads to measure
+throughput and peak memory at that scale.
+
+## Validation
+
+- **Evidence loss and near misses.** The evaluator reports lost molecules,
+  lost genomes and extra exemplars. `examples/ont_nearmiss.rs` measures pair
+  merge probability across sequence divergence and endpoint offsets through
+  the full deduplicator, with an identical-template duplicate control. Each
+  trial uses a fresh context; mixed-strain clustering tests also check whether
+  a rare strain survives many comparisons in different arrival orders.
+- **Simulator.** `ont-sim` generates genomes, optionally related by a set
+  divergence, and molecules with defined endpoints, including dense coverage
+  and nearby distinct endpoints. PCR families get independent substitution,
+  insertion and deletion errors, with optional foldback tails, homopolymer
+  tails and reverse complements. Quality-conditioned simulation draws
+  qualities before errors, with configurable calibration, unreported errors
+  and read-level variability. Simulation error-model parameters are supplied
+  at runtime.
+- **Metrics.** The evaluator reports pair-level precision and recall against
+  molecule truth and endpoint-identifiability truth, merges, splits,
+  duplicate-count bias, and recall by strand and foldback status. `ont_eval`
+  adds timing and work counters.
+- **Scale test.** `examples/ont_scale.rs` streams synthetic reads without
+  storing them to measure throughput and peak memory at tens of millions of
+  reads.
+
+## Limitations
 
 Independent molecules can share endpoints by chance, especially at deep
 coverage of short genomes. Close strains can still merge, and the pair budget
 does not guarantee a false-merge rate outside the noise model. Raw read ends,
-including foldbacks, are compared without trimming. Low-complexity endpoints
-can be ambiguous.
+including foldbacks, are compared without trimming (see "Read ends").
+Low-complexity endpoints can be ambiguous.
 
-`ont-sim` generates reads and evaluates molecule/endpoint assignments;
-`ont_eval` adds timing and work counters. `ont_nearmiss` measures pair merge
-probability across divergence and endpoint offsets. `ont_scale` streams reads
-to measure throughput and peak memory. Error rates are supplied at runtime.
+Saturated groups also cost more per read: each seed matches many leaders,
+and the cost grows with the number of leaders. In the synthetic scale test
+with all reads from one 7 kb genome (`ont_scale --genomes 1 --genome-len 7000`,
+default parameters), per-read cost went from about 43 to 74 µs as reads went
+from 1M to 4M; other synthetic inputs ran at 19–33 µs per read. These figures
+illustrate bucketing and storage costs; runtime depends on the machine and
+comparison parameters.

@@ -28,9 +28,9 @@ use std::ops::Range;
 ///
 /// The whole-read edit budget is set per pair (see `pair_budget`): quality
 /// scores estimate the pair's sequencing noise, and reads merge only if their
-/// distance is unlikely (< 5%) for reads of strains `protect_divergence`
-/// apart. `max_error_frac` only caps the budget. `pair_distance_cv` is a
-/// provisional allowance for extra variability.
+/// distance is unlikely (below `pair_tail_probability`, default 5%) for strains
+/// `protect_divergence` apart. `max_error_frac` only caps the budget.
+/// `pair_distance_cv` is a provisional allowance for extra variability.
 #[derive(Debug, Clone)]
 pub struct OntDedupParams {
     /// Endpoint displacement (bases) allowed at each end at no cost.
@@ -52,6 +52,8 @@ pub struct OntDedupParams {
     pub quality_error_floor: f64,
     /// Additional relative uncertainty of pair distance (finite, nonnegative).
     pub pair_distance_cv: f64,
+    /// Per-comparison lower-tail probability (0 < value <= 1; default 0.05).
+    pub pair_tail_probability: f64,
     /// Seed-offset drift allowance, independent of the whole-read cutoff.
     pub seed_drift_frac: f64,
     /// Expected error probability for empty or exactly constant qualities.
@@ -73,6 +75,7 @@ impl Default for OntDedupParams {
             noise_scale: 1.0,
             quality_error_floor: 0.002,
             pair_distance_cv: 0.25,
+            pair_tail_probability: 0.05,
             seed_drift_frac: 0.04,
             assumed_error_rate: 0.01,
             rc_tolerant: true,
@@ -92,6 +95,12 @@ impl OntDedupParams {
             ("noise_scale", self.noise_scale, true, 100.0),
             ("quality_error_floor", self.quality_error_floor, false, 1.0),
             ("pair_distance_cv", self.pair_distance_cv, false, 100.0),
+            (
+                "pair_tail_probability",
+                self.pair_tail_probability,
+                true,
+                1.0,
+            ),
             ("seed_drift_frac", self.seed_drift_frac, false, 1.0),
             ("assumed_error_rate", self.assumed_error_rate, false, 1.0),
         ] {
@@ -109,6 +118,7 @@ impl OntDedupParams {
 /// Whether every byte is a valid Phred+33 quality (33..=126).
 /// Empty qualities are valid and use the assumed error rate.
 pub fn validate_quality(qual: &[u8]) -> bool {
+    // The non-short-circuit fold lets the compiler vectorize byte validation.
     !qual
         .iter()
         .fold(false, |invalid, &q| invalid | !(33..=126).contains(&q))
@@ -202,15 +212,16 @@ pub(crate) fn pair_budget(
         mu,
         noise_variance(mu, noise, params.pair_distance_cv),
         whole_read_cap(a_len, b_len, params),
+        params.pair_tail_probability,
     )
 }
 
-/// Largest k <= cap with F(k) < .05 for NB(mean, variance), or Poisson
+/// Largest k <= cap with F(k) < tail_probability for NB(mean, variance), or Poisson
 /// when variance equals the mean.
 /// Sum relative masses starting at one, keeping log(P(0)) separately. Rescale
 /// before masses grow too large. Never initialize a recurrence with exp(logP0),
 /// which can underflow and silently turn an entire CDF into zero.
-fn lower_tail_budget(mu: f64, variance: f64, cap: usize) -> Option<usize> {
+fn lower_tail_budget(mu: f64, variance: f64, cap: usize, tail_probability: f64) -> Option<usize> {
     if !mu.is_finite() || mu < 0.0 || !variance.is_finite() || variance < mu {
         return None;
     }
@@ -230,7 +241,7 @@ fn lower_tail_budget(mu: f64, variance: f64, cap: usize) -> Option<usize> {
     if !log_scale.is_finite() {
         return None;
     }
-    let mut threshold = (0.05_f64.ln() - log_scale).exp();
+    let mut threshold = (tail_probability.ln() - log_scale).exp();
     let (mut mass, mut sum) = (1.0, 1.0);
     if sum >= threshold {
         return None;
@@ -250,7 +261,7 @@ fn lower_tail_budget(mu: f64, variance: f64, cap: usize) -> Option<usize> {
             log_scale += sum.ln();
             mass /= sum;
             sum = 1.0;
-            threshold = (0.05_f64.ln() - log_scale).exp();
+            threshold = (tail_probability.ln() - log_scale).exp();
         }
     }
     Some(cap)
@@ -258,6 +269,7 @@ fn lower_tail_budget(mu: f64, variance: f64, cap: usize) -> Option<usize> {
 
 /// Assumed-rate comparator, with the production order: cap, ends, budget,
 /// length compatibility, then whole-read alignment.
+/// Keep in sync with context::matches_leader; its agreement test covers both.
 #[cfg(test)]
 pub(crate) fn is_duplicate(a: &[u8], b: &[u8], params: &OntDedupParams) -> bool {
     let cap = whole_read_cap(a.len(), b.len(), params);
@@ -645,7 +657,7 @@ mod tests {
 mod quality_tests {
     use super::*;
     fn cutoff(mu: f64, cv: f64, cap: usize) -> Option<usize> {
-        lower_tail_budget(mu, noise_variance(mu, mu, cv), cap)
+        lower_tail_budget(mu, noise_variance(mu, mu, cv), cap, 0.05)
     }
 
     /// The budget for a pair with this noise and divergence term, cv 0.25.
@@ -692,16 +704,28 @@ mod quality_tests {
     }
 
     #[test]
+    fn tail_probability_is_overridable_and_controls_strictness() {
+        let mut p = OntDedupParams::default();
+        assert_eq!(p.pair_tail_probability, 0.05);
+        let default = pair_budget(3200, 3200, 32.0, 32.0, &p).unwrap();
+        p.pair_tail_probability = 0.01;
+        assert!(pair_budget(3200, 3200, 32.0, 32.0, &p).unwrap() < default);
+        p.pair_tail_probability = 0.1;
+        assert!(pair_budget(3200, 3200, 32.0, 32.0, &p).unwrap() > default);
+    }
+
+    #[test]
     fn validates_statistical_parameters() {
         type Setter = fn(&mut OntDedupParams, f64);
         // (setter, must be positive, upper bound)
-        let fields: [(Setter, bool, f64); 8] = [
+        let fields: [(Setter, bool, f64); 9] = [
             (|p, v| p.max_error_frac = v, false, 1.0),
             (|p, v| p.protect_divergence = v, true, 1.0),
             (|p, v| p.quality_calibration = v, true, 100.0),
             (|p, v| p.noise_scale = v, true, 100.0),
             (|p, v| p.quality_error_floor = v, false, 1.0),
             (|p, v| p.pair_distance_cv = v, false, 100.0),
+            (|p, v| p.pair_tail_probability = v, true, 1.0),
             (|p, v| p.seed_drift_frac = v, false, 1.0),
             (|p, v| p.assumed_error_rate = v, false, 1.0),
         ];

@@ -119,7 +119,9 @@ cargo build --release --bin dedup_ont_fastq
 - **`--protect-divergence`** sets the strain divergence against which to
   protect (default 0.015, or 1.5%). Each pair gets a cutoff based on expected
   sequencing noise and this divergence. Short or noisy reads can remain
-  unmerged when the evidence is insufficient.
+  unmerged when the evidence is insufficient. Lower values protect closer
+  strains and make merging stricter, keeping more duplicates; higher values
+  merge more.
 - **`--noise-scale POSITIVE`** overrides the multiplier on the quality-derived
   noise estimate (default 1.0). The expected noise per read is
   `noise_scale × (scale × quality-predicted errors + per-base floor × length)`,
@@ -140,9 +142,12 @@ From Rust, use `nao_dedup::ont::OntDedupContext`: feed sequence/quality slices
 with `process_read_by_index`, then `finalize` and query `get_exemplar_index`.
 Library parameters include `quality_calibration` (default 1.2),
 `quality_error_floor` (default 0.002), `noise_scale` (default 1.0), and endpoint,
-distance and seed controls. `noise_scale` multiplies both usable-quality noise
+distance and seed controls. `pair_tail_probability` overrides the per-comparison
+tail cutoff (default 0.05). `noise_scale` multiplies both usable-quality noise
 terms; assumed-rate noise is independent of it.
-Invalid parameters or malformed nonempty Phred+33 quality strings panic.
+The library panics on invalid parameters, malformed nonempty Phred+33
+qualities, or nonempty quality/sequence length mismatches. The CLI reports
+these as errors.
 `ont::validate_quality` checks the byte range without panicking.
 
 ---

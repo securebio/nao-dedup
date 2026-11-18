@@ -445,3 +445,146 @@ fn quality_conditioned_duplicate_recall_and_protected_near_misses() {
         2 * trials
     );
 }
+
+#[test]
+fn default_params_protect_related_strains_with_good_duplicate_recall() {
+    use ont_sim::{QualityConfig, add_quality_errors};
+    use rand::seq::index::sample;
+
+    let params = OntDedupParams::default();
+    let model = QualityConfig::enabled(0.01, 0.2, 1.5, 1.0, 0.1);
+    let mut rng = StdRng::seed_from_u64(5801);
+    let trials = 150;
+    let (mut duplicates, mut false_merges) = (0, 0);
+    for trial in 0..trials {
+        let source = random_seq(3000, &mut rng);
+        let mut strain = source.clone();
+        let changes = (1.5 * params.protect_divergence * source.len() as f64).ceil() as usize;
+        for pos in sample(&mut rng, source.len(), changes) {
+            strain[pos] = if strain[pos] == b'A' { b'C' } else { b'A' };
+        }
+        let mut reads = Vec::new();
+        for template in [&source, &source, &strain] {
+            let (mut seq, mut q, _) =
+                add_quality_errors(template, &model, [0.4, 0.3, 0.3], 1.0, &mut rng);
+            if rng.gen_bool(0.5) {
+                seq = reverse_complement(&seq);
+                q.reverse();
+            }
+            reads.push((seq, q));
+        }
+        // Each pair starts a fresh deduplicator, including seed retrieval.
+        for (other, count) in [(1, &mut duplicates), (2, &mut false_merges)] {
+            let mut pair = vec![reads[0].clone(), reads[other].clone()];
+            if trial % 2 == 0 {
+                pair.reverse();
+            }
+            let assignments = run(&pair, params.clone());
+            *count += usize::from(assignments[0] == assignments[1]);
+        }
+    }
+    assert!(duplicates >= 135, "{duplicates}/{trials} duplicates merged");
+    // Allow sampling margin without claiming the model's 5% tail is a
+    // pipeline-wide bound, or testing only specially calibrated parameters.
+    assert!(
+        false_merges <= 7,
+        "{false_merges}/{trials} strain pairs merged"
+    );
+}
+
+#[test]
+fn default_params_preserve_rare_strains_in_dense_mixed_clusters() {
+    use ont_sim::{QualityConfig, add_quality_errors};
+    use rand::seq::index::sample;
+
+    struct Read {
+        seq: Vec<u8>,
+        qual: Vec<u8>,
+        molecule: usize,
+        strain_b: bool,
+    }
+
+    let params = OntDedupParams::default();
+    let model = QualityConfig::enabled(0.01, 0.2, 1.5, 1.0, 0.1);
+    let mut rng = StdRng::seed_from_u64(5802);
+    let molecules = 12;
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    for molecule in 0..molecules {
+        let source = random_seq(3000, &mut rng);
+        let mut strain = source.clone();
+        let changes = (1.5 * params.protect_divergence * source.len() as f64).ceil() as usize;
+        for pos in sample(&mut rng, source.len(), changes) {
+            strain[pos] = if strain[pos] == b'A' { b'C' } else { b'A' };
+        }
+        // One A and one B molecule have coincident endpoints at each site;
+        // PCR abundance differs sixteenfold. Every copy gets fresh errors.
+        for (strain_b, template, copies) in [(false, &source, 64), (true, &strain, 4)] {
+            for _ in 0..copies {
+                let (mut seq, mut qual, _) =
+                    add_quality_errors(template, &model, [0.4, 0.3, 0.3], 1.0, &mut rng);
+                if rng.gen_bool(0.5) {
+                    seq = reverse_complement(&seq);
+                    qual.reverse();
+                }
+                let read = Read {
+                    seq,
+                    qual,
+                    molecule,
+                    strain_b,
+                };
+                if strain_b {
+                    b.push(read);
+                } else {
+                    a.push(read);
+                }
+            }
+        }
+    }
+    let interleaved: Vec<_> = a
+        .chunks(16)
+        .zip(&b)
+        .flat_map(|(chunk, read)| chunk.iter().chain(std::iter::once(read)))
+        .collect();
+    for (name, order) in [
+        ("B first", b.iter().chain(&a).collect::<Vec<_>>()),
+        ("interleaved", interleaved),
+        ("B last", a.iter().chain(&b).collect()),
+    ] {
+        assert_eq!(order.len(), a.len() + b.len());
+        let mut ctx = OntDedupContext::new(params.clone(), OntMinimizerParams::default());
+        for (idx, read) in order.iter().enumerate() {
+            ctx.process_read_by_index(idx, &read.seq, &read.qual);
+        }
+        ctx.finalize();
+        let a_clusters: std::collections::HashSet<_> = order
+            .iter()
+            .enumerate()
+            .filter(|(_, read)| !read.strain_b)
+            .map(|(idx, _)| ctx.get_exemplar_index(idx))
+            .collect();
+        let mut represented = vec![false; molecules];
+        let mut absorbed = 0;
+        let mut b_duplicates = 0;
+        for (idx, read) in order.iter().enumerate().filter(|(_, r)| r.strain_b) {
+            let exemplar = ctx.get_exemplar_index(idx);
+            let own_cluster = order[exemplar].strain_b && !a_clusters.contains(&exemplar);
+            absorbed += usize::from(!own_cluster);
+            if own_cluster {
+                assert_eq!(order[exemplar].molecule, read.molecule, "{name}");
+                represented[read.molecule] = true;
+                b_duplicates += usize::from(exemplar != idx);
+            }
+        }
+        assert!(
+            absorbed <= 2,
+            "{name}: {absorbed}/{} B reads absorbed",
+            b.len()
+        );
+        assert!(represented.iter().all(|&r| r), "{name}: B molecule lost");
+        // Protection must retain real clusters rather than split every read.
+        assert!(
+            b_duplicates >= 30,
+            "{name}: only {b_duplicates} B duplicates merged"
+        );
+    }
+}

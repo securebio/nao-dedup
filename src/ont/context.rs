@@ -110,6 +110,7 @@ struct LeaderScratch {
 /// Match a packed leader, unpacking its ends first and its full sequence
 /// only after the endpoint and budget checks pass. A successful match carries
 /// the exact edit distance.
+/// Keep stages in sync with compare::is_duplicate (checked by the agreement test).
 fn matches_leader(
     read: &[u8],
     errors: (f32, f32),
@@ -530,6 +531,93 @@ impl OntDedupContext {
 mod tests {
     use super::*;
     use crate::ont::test_util::{random_seq, substitute};
+
+    #[test]
+    fn packed_leader_and_test_comparator_agree_on_staged_checks() {
+        use crate::ont::compare::is_duplicate;
+        use rand::{SeedableRng, rngs::StdRng};
+
+        let mut rng = StdRng::seed_from_u64(145);
+        let params = OntDedupParams::default();
+        for verbatim in [false, true] {
+            let mut leader = random_seq(600, &mut rng);
+            if verbatim {
+                leader[100] = b'N';
+            }
+            let mut inserted = leader.clone();
+            inserted.splice(200..200, *b"ACG");
+            let mut divergent = leader.clone();
+            for pos in 200..240 {
+                substitute(&mut divergent, pos);
+            }
+            let reads = [
+                (leader.clone(), true),
+                (leader[2..].to_vec(), true),
+                (inserted, true),
+                (leader[3..].to_vec(), false), // endpoint displacement
+                (leader[..500].to_vec(), false), // length exceeds cap
+                ([&leader[..200], &leader[220..]].concat(), false), // pair length budget
+                (divergent, false),            // whole-read distance exceeds pair budget
+            ];
+            let mut leaders = LeaderStore::default();
+            let id = leaders.push(&leader);
+            let mut scratch = LeaderScratch::default();
+            for (read, expected) in reads {
+                for swapped in [false, true] {
+                    let (a, b) = if swapped {
+                        (&leader, &read)
+                    } else {
+                        (&read, &leader)
+                    };
+                    let mut reverse_store = LeaderStore::default();
+                    let (store, id) = if swapped {
+                        let reverse_id = reverse_store.push(b);
+                        (&reverse_store, reverse_id)
+                    } else {
+                        (&leaders, id)
+                    };
+                    let cached = OnceCell::new();
+                    // Repeated attempts also check the production budget cache.
+                    for _ in 0..2 {
+                        let production = matches_leader(
+                            a,
+                            (-1.0, -1.0),
+                            &cached,
+                            store,
+                            id,
+                            &mut scratch,
+                            &params,
+                        )
+                        .is_some();
+                        assert_eq!(
+                            production,
+                            expected,
+                            "verbatim={verbatim} swapped={swapped} len={}",
+                            a.len()
+                        );
+                        assert_eq!(production, is_duplicate(a, b, &params));
+                    }
+                }
+            }
+        }
+        // A short identical pair has a negative statistical budget.
+        let seq = random_seq(50, &mut rng);
+        let mut leaders = LeaderStore::default();
+        let id = leaders.push(&seq);
+        assert!(!is_duplicate(&seq, &seq, &params));
+        assert!(
+            matches_leader(
+                &seq,
+                (-1.0, -1.0),
+                &OnceCell::new(),
+                &leaders,
+                id,
+                &mut LeaderScratch::default(),
+                &params,
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn finalize_releases_comparison_buffers_and_preserves_exemplars() {
