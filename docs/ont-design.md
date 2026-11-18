@@ -62,16 +62,16 @@ The expected noise per read is
 `noise_scale × (quality_calibration × quality-predicted errors + quality_error_floor × length)`.
 Quality-predicted errors sum `10^(-Q/10)` over bases; library parameters
 `quality_calibration` and `quality_error_floor` default to 1.2 and 0.002;
-`noise_scale` defaults to 1.0 and can be overridden. Empty or exactly constant
-qualities instead contribute `assumed_error_rate × length` (default rate 0.01),
-without quality terms or `noise_scale`. Malformed nonempty qualities are errors.
+`noise_scale` defaults to 1.0. Empty or exactly constant qualities instead
+contribute `assumed_error_rate × length` (default rate 0.01), without quality
+terms or `noise_scale`. Malformed nonempty qualities are errors.
 
 `quality_calibration = 1.2`, `quality_error_floor = 0.002`,
 `pair_distance_cv = 0.25` and the 5% tail cutoff
 (`pair_tail_probability = 0.05`) are tuned engineering defaults. Library
 callers can override all four; the CLI also exposes `noise_scale` for adjusting
-the quality-derived noise contribution. `noise_scale` stays fixed during a run;
-there is no automatic calibration.
+the quality-derived noise contribution. The CLI estimates `noise_scale` before
+clustering by default; it stays fixed throughout production clustering.
 
 Pair noise sums the two reads' contributions. A pair from strains
 `protect_divergence` apart has mean distance
@@ -86,12 +86,48 @@ The default 5% is per comparison under the working model, not a bound on final
 cluster contamination. A read can encounter multiple leaders, and greedy
 clustering and model mismatch can change the aggregate false-merge rate.
 
+## Automatic quality calibration
+
+The CLI defaults to `--noise-scale auto`: a pilot at the start of the input
+estimates one multiplier on the configured quality scale and floor.
+`--noise-scale POSITIVE` sets it directly and skips the pilot. Calibration
+does not change assumed-rate noise for reads without usable qualities.
+
+The pilot uses greedy clustering with a 12% distance cap and only exact-endpoint
+(zero-offset) pairs. Such pairs are almost surely copies of one molecule, so
+their distances measure sequencing noise; tolerating offsets would admit more
+chance coincidences. Pilot comparisons use `protect_divergence = 1` and
+`pair_distance_cv = 0` so the cap binds. The fit's weights use the configured
+CV. Only the first eligible pair per leader contributes, with usable qualities
+in both reads and at least 10 expected baseline errors per pair. A weighted
+median of distance-to-baseline-noise ratios is shrunk toward 1 and bounded to
+[0.5, 2]. The 2x ceiling prioritizes precision: noisier inputs keep some
+duplicates rather than risk merging strains.
+
+Calibration is best effort. Fewer than 200 eligible pairs, unavailable qualities
+or numerical failure fall back to the baseline multiplier 1.0. Even very large
+inputs with little duplication may yield too few pairs in the sampled prefix.
+Coincident endpoints from related strains, inputs concatenated from several
+runs, and input order can shift the bounded, shrunk estimate. The stderr report
+gives the multiplier, support and fallback or stop reason.
+
+Collection stops at 500 retained pairs, 200,000 reads, 256 MiB of sequence plus
+quality, or EOF; a prefix without usable qualities stops at 20,000 reads.
+The CLI buffers sequence and quality, drops the pilot, then replays the prefix
+in input order into a fresh production context and continues on the same
+reader. Buffered payload is bounded to 256 MiB plus the final read; vector
+capacity, record metadata, reader buffers and the pilot's seed/leader index
+add overhead. The read limit also bounds per-record overhead. Library callers
+using `NoiseScalePilot` or `estimate_noise_scale` must buffer sampled reads
+themselves for replay; `CalibrationOptions` configures collection limits.
+
 ## CLI and storage
 
 The CLI exposes INPUT, optional OUTPUT, `--assignments`, `--protect-divergence`,
 `--noise-scale` and `--no-rc`, plus expert `--max-end-offset` and
 `--assumed-error-rate`. Other matching and seed controls remain library and
-example parameters.
+example parameters. `ont_eval --auto-calibrate` estimates the same multiplier
+on its configured baseline shape.
 
 Input can be plain or gzip FASTQ, detected from the first two bytes even when
 reads from a stream are short. Assignments are written after finalization in

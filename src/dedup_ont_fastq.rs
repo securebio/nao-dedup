@@ -1,12 +1,16 @@
 //! Deduplicate a single-end ONT FASTQ file.
 //!
-//! Stream reads into clusters, then optionally reread to write exemplar records.
+//! Buffer a calibration prefix, replay it into production clustering, then
+//! continue on the same reader. Optionally reread to write exemplar records.
 
 use clap::Parser;
 use flate2::Compression;
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
-use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams, validate_quality};
+use nao_dedup::ont::{
+    CalibrationOptions, NoiseScalePilot, OntDedupContext, OntDedupParams, OntMinimizerParams,
+    validate_quality,
+};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -37,9 +41,9 @@ struct Cli {
     /// Strain divergence against which to protect
     #[arg(long, default_value_t = OntDedupParams::default().protect_divergence)]
     protect_divergence: f64,
-    /// Multiplier on the quality-derived noise estimate
-    #[arg(long, default_value_t = OntDedupParams::default().noise_scale, value_name = "POSITIVE", value_parser = parse_noise_scale)]
-    noise_scale: f64,
+    /// Measure a noise multiplier automatically, or use a fixed positive value
+    #[arg(long, default_value = "auto", value_name = "auto|POSITIVE", value_parser = parse_noise_scale)]
+    noise_scale: AutoNumber,
     /// Expected error rate for empty or exactly constant qualities
     #[arg(long, default_value_t = OntDedupParams::default().assumed_error_rate)]
     assumed_error_rate: f64,
@@ -49,10 +53,19 @@ struct Cli {
     no_rc: bool,
 }
 
-fn parse_noise_scale(value: &str) -> Result<f64, String> {
+#[derive(Debug, Clone, Copy)]
+enum AutoNumber {
+    Auto,
+    Fixed(f64),
+}
+
+fn parse_noise_scale(value: &str) -> Result<AutoNumber, String> {
+    if value == "auto" {
+        return Ok(AutoNumber::Auto);
+    }
     match value.parse::<f64>() {
-        Ok(n) if n.is_finite() && n > 0.0 => Ok(n),
-        _ => Err("expected a finite positive number".into()),
+        Ok(n) if n.is_finite() && n > 0.0 => Ok(AutoNumber::Fixed(n)),
+        _ => Err("expected auto or a finite positive number".into()),
     }
 }
 
@@ -269,11 +282,18 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+fn process_read(ctx: &mut OntDedupContext, n_reads: &mut usize, sequence: &[u8], quality: &[u8]) {
+    ctx.process_read_by_index(*n_reads, sequence, quality);
+    *n_reads += 1;
+    if (*n_reads).is_multiple_of(100_000) {
+        eprintln!("  Processed {n_reads} reads...");
+    }
+}
+
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let dedup_params = OntDedupParams {
+    let mut dedup_params = OntDedupParams {
         max_end_offset: cli.max_end_offset,
         protect_divergence: cli.protect_divergence,
-        noise_scale: cli.noise_scale,
         assumed_error_rate: cli.assumed_error_rate,
         rc_tolerant: !cli.no_rc,
         ..Default::default()
@@ -296,19 +316,43 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     check_distinct_paths(&cli)?;
     let mut record = FastqRecord::default();
     let mut reader = open_fastq(&cli.input)?;
+    let mut buffered = Vec::new();
+    dedup_params.noise_scale = match cli.noise_scale {
+        AutoNumber::Fixed(multiplier) => {
+            eprintln!("Noise scale: fixed a={multiplier}");
+            multiplier
+        }
+        AutoNumber::Auto => {
+            let mut pilot = NoiseScalePilot::new(
+                &dedup_params,
+                &minimizer_params,
+                &CalibrationOptions::default(),
+            );
+            while !pilot.is_finished()
+                && reader
+                    .next_into(&mut record)
+                    .map_err(|e| with_path(e, &cli.input))?
+            {
+                pilot.process_read(&record.sequence, &record.quality);
+                buffered.push((record.sequence.clone(), record.quality.clone()));
+            }
+            let report = pilot.finish();
+            eprintln!("{report}");
+            report.multiplier
+        }
+    };
 
     eprintln!("Pass 1: Building deduplication index...");
     let mut ctx = OntDedupContext::new(dedup_params, minimizer_params);
     let mut n_reads = 0;
+    for (sequence, quality) in buffered.into_iter() {
+        process_read(&mut ctx, &mut n_reads, &sequence, &quality);
+    }
     while reader
         .next_into(&mut record)
         .map_err(|e| with_path(e, &cli.input))?
     {
-        ctx.process_read_by_index(n_reads, &record.sequence, &record.quality);
-        n_reads += 1;
-        if n_reads % 100_000 == 0 {
-            eprintln!("  Processed {n_reads} reads...");
-        }
+        process_read(&mut ctx, &mut n_reads, &record.sequence, &record.quality);
     }
     ctx.finalize();
     let (total, clusters) = ctx.stats();

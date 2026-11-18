@@ -189,6 +189,15 @@ fn score(len: usize, quality_len: usize, phred_sum: u64) -> Score {
     (mean_q, len)
 }
 
+/// Information already known after a successful alignment.
+#[derive(Clone, Copy)]
+pub(crate) struct LeaderMatch {
+    pub cluster: u32,
+    pub distance: usize,
+    pub len: usize,
+    pub errors: f32,
+}
+
 /// Counters describing the work done, for tuning and diagnostics.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OntDedupStats {
@@ -288,6 +297,16 @@ impl OntDedupContext {
     ///
     /// Returns the cluster id the read was assigned to.
     pub fn process_read_by_index(&mut self, idx: usize, seq: &[u8], qual: &[u8]) -> u32 {
+        self.process_read(idx, seq, qual).0
+    }
+
+    /// Assignment, matched leader information, and the read's expected errors.
+    pub(crate) fn process_read(
+        &mut self,
+        idx: usize,
+        seq: &[u8],
+        qual: &[u8],
+    ) -> (u32, Option<LeaderMatch>, f32) {
         assert!(
             !self.finalized,
             "process_read_by_index called after finalize()"
@@ -313,7 +332,10 @@ impl OntDedupContext {
         let matched = self.find_matching_cluster(&read, errors, &seeds);
 
         let cluster_id = match matched {
-            Some(cluster_id) => {
+            Some(LeaderMatch {
+                cluster: cluster_id,
+                ..
+            }) => {
                 let cluster = &mut self.clusters[cluster_id as usize];
                 if score > cluster.best_score {
                     cluster.best_read_idx = read_idx;
@@ -353,7 +375,7 @@ impl OntDedupContext {
             self.results.resize(idx + 1, 0);
         }
         self.results[idx] = cluster_id;
-        cluster_id
+        (cluster_id, matched, errors)
     }
 
     /// First leader that `read` duplicates in an allowed orientation.
@@ -365,7 +387,12 @@ impl OntDedupContext {
     /// the search stops at the first match. Seeds near the ends are the most
     /// precise, and in dense groups most reads match early, which avoids
     /// scanning the large buckets of inner seeds.
-    fn find_matching_cluster(&mut self, read: &[u8], errors: f32, seeds: &EndSeeds) -> Option<u32> {
+    fn find_matching_cluster(
+        &mut self,
+        read: &[u8],
+        errors: f32,
+        seeds: &EndSeeds,
+    ) -> Option<LeaderMatch> {
         self.evidence.start_read(self.clusters.len());
         let mut rc_ready = false;
         for window in 0..seeds.start.len().max(seeds.end.len()) {
@@ -420,7 +447,12 @@ impl OntDedupContext {
     /// repeats, seeds from one end can match the other end's sequence and
     /// point the wrong way. Each orientation is tried at most once per
     /// leader.
-    fn align_ready(&mut self, read: &[u8], errors: f32, rc_ready: &mut bool) -> Option<u32> {
+    fn align_ready(
+        &mut self,
+        read: &[u8],
+        errors: f32,
+        rc_ready: &mut bool,
+    ) -> Option<LeaderMatch> {
         let params = &self.dedup_params;
         for &cluster in self.candidates.iter() {
             let budget = OnceCell::new();
@@ -452,7 +484,7 @@ impl OntDedupContext {
                     self.stats.assumed_rate_comparisons += 1;
                 }
                 let scratch = &mut self.leader_scratch;
-                if matches_leader(
+                if let Some(matched) = matches_leader(
                     oriented,
                     (errors, leader_errors),
                     &budget,
@@ -460,10 +492,13 @@ impl OntDedupContext {
                     cluster,
                     scratch,
                     params,
-                )
-                .is_some()
-                {
-                    return Some(cluster);
+                ) {
+                    return Some(LeaderMatch {
+                        cluster,
+                        distance: matched,
+                        len: self.leaders.len(cluster),
+                        errors: leader_errors,
+                    });
                 }
             }
         }

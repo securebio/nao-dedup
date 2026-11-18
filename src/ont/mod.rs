@@ -3,11 +3,16 @@
 //! See `docs/ont-design.md` for the design. This module is independent of the
 //! Illumina path in the crate root.
 
+mod calibrate;
 mod compare;
 mod context;
 mod leaders;
 mod seeds;
 
+pub use calibrate::{
+    CalibrationOptions, CalibrationReport, CalibrationStatus, NoiseScalePilot, StopReason,
+    estimate_noise_scale,
+};
 pub use compare::{OntDedupParams, validate_quality};
 pub use context::{OntDedupContext, OntDedupStats};
 pub use seeds::OntMinimizerParams;
@@ -43,6 +48,10 @@ pub(crate) mod test_util {
 
     pub fn random_seq(len: usize, rng: &mut StdRng) -> Vec<u8> {
         (0..len).map(|_| b"ACGT"[rng.gen_range(0..4)]).collect()
+    }
+
+    pub fn varied_quality(len: usize, first: u8) -> Vec<u8> {
+        (0..len).map(|i| first + (i % 2) as u8).collect()
     }
 
     pub fn substitute(seq: &mut [u8], pos: usize) {

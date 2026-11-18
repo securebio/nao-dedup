@@ -106,8 +106,10 @@ cargo build --release --bin dedup_ont_fastq
   --assignments assignments.tsv
 ```
 
-- **INPUT** accepts plain or gzip FASTQ, detected by content. Reads stream
-  directly into clustering.
+- **INPUT** accepts plain or gzip FASTQ, detected by content. The CLI buffers
+  sequence and quality for a calibration prefix, replays it into clustering,
+  then continues from the same reader. The default buffer limit is 256 MiB
+  of sequence plus quality, with at most one read beyond the limit.
 - **OUTPUT** contains one exemplar per group, preserving record text except
   for normalizing line endings to `\n`. A `.gz` suffix enables gzip compression;
   plain output can go to `/dev/stdout` for a parallel compressor.
@@ -122,10 +124,16 @@ cargo build --release --bin dedup_ont_fastq
   unmerged when the evidence is insufficient. Lower values protect closer
   strains and make merging stricter, keeping more duplicates; higher values
   merge more.
-- **`--noise-scale POSITIVE`** overrides the multiplier on the quality-derived
-  noise estimate (default 1.0). The expected noise per read is
-  `noise_scale × (scale × quality-predicted errors + per-base floor × length)`,
-  with scale and floor defaulting to 1.2 and 0.002.
+- **`--noise-scale auto|POSITIVE`** defaults to `auto`. The expected noise per
+  read is `noise_scale × (scale × quality-predicted errors + per-base floor × length)`,
+  with scale and floor defaulting to 1.2 and 0.002. The CLI measures one
+  multiplier from the start of the input, shrinks it toward 1 and bounds it
+  to [0.5, 2]. The 2x cap prioritizes protecting strains; noisier inputs may
+  retain some duplicates. Calibration is best effort: even a very large
+  input with little duplication can yield too few pilot pairs and fall back
+  to 1.0. A number sets the multiplier directly and skips the pilot. A
+  one-line report on stderr gives the automatic factor, support and stop
+  reason. Fixed mode prints `Noise scale: fixed a=N`.
 - **`--no-rc`** restricts matching to the same orientation.
 - **Expert flags:** `--max-end-offset` sets endpoint tolerance (default 2
   bases). `--assumed-error-rate` sets per-base noise for empty or exactly
@@ -149,6 +157,14 @@ The library panics on invalid parameters, malformed nonempty Phred+33
 qualities, or nonempty quality/sequence length mismatches. The CLI reports
 these as errors.
 `ont::validate_quality` checks the byte range without panicking.
+
+`estimate_noise_scale` accepts an iterator of sequence/quality slices;
+`NoiseScalePilot` supports incremental collection with `CalibrationOptions`
+for pair, read and byte limits. Both return a `CalibrationReport`. Callers must
+buffer sampled reads themselves to replay them through a fresh context with
+`noise_scale = report.multiplier`.
+Call `finish()` when input ends or a collection limit is reached. A report with
+`stop_reason = None` means input ended before a stopping rule fired.
 
 ---
 

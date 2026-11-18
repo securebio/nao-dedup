@@ -186,11 +186,9 @@ fn cli_exposes_user_decisions() {
         assert!(text.contains(flag), "{text}");
     }
     assert!(text.contains("regular file"), "{text}");
-    assert!(text.contains("--noise-scale <POSITIVE>"), "{text}");
-    assert!(
-        text.contains("Multiplier on the quality-derived noise estimate [default: 1]"),
-        "{text}"
-    );
+    let noise_help = text.split_once("--noise-scale").unwrap().1;
+    let noise_help = noise_help.split("\n      --").next().unwrap();
+    assert!(noise_help.contains("[default: auto]"), "{text}");
     // Tuning constants stay library-only; the CLI exposes user decisions.
     for removed in [
         "--end-check-len",
@@ -367,11 +365,26 @@ fn validates_statistical_parameters_and_phred_bytes() {
         ("--assumed-error-rate", "NaN", "assumed_error_rate"),
         ("--assumed-error-rate", "inf", "assumed_error_rate"),
         ("--assumed-error-rate", "1.1", "assumed_error_rate"),
-        ("--noise-scale", "auto", "expected a finite positive number"),
-        ("--noise-scale", "0", "expected a finite positive number"),
-        ("--noise-scale", "NaN", "expected a finite positive number"),
-        ("--noise-scale", "inf", "expected a finite positive number"),
-        ("--noise-scale", "oops", "expected a finite positive number"),
+        (
+            "--noise-scale",
+            "0",
+            "expected auto or a finite positive number",
+        ),
+        (
+            "--noise-scale",
+            "NaN",
+            "expected auto or a finite positive number",
+        ),
+        (
+            "--noise-scale",
+            "inf",
+            "expected auto or a finite positive number",
+        ),
+        (
+            "--noise-scale",
+            "oops",
+            "expected auto or a finite positive number",
+        ),
     ] {
         run_on("", &[&format!("{flag}={bad}")])
             .0
@@ -394,20 +407,149 @@ fn validates_statistical_parameters_and_phred_bytes() {
 }
 
 #[test]
-fn accepts_numeric_noise_scale() {
+fn auto_calibration_reports_fallback_and_fixed_scale_bypasses_pilot() {
     let input = "@r0\nACGT\n+\nIJIJ\n";
-    for value in ["0.25", "1", "2.5", "6"] {
-        let (assert, dir) = run_on(input, &["--noise-scale", value]);
-        assert.success();
+    let (assert, _) = run_on(input, &[]);
+    let stderr = stderr_of(&assert.success()).into_owned();
+    for field in [
+        "Noise scale: status=fallback(insufficient eligible pairs)",
+        "a=1.0000",
+        "pairs=0",
+        "stop=none",
+    ] {
+        assert!(stderr.contains(field), "{stderr}");
+    }
+    for value in ["0.25", "2.5", "6"] {
+        let (assert, _) = run_on(input, &["--noise-scale", value]);
+        let result = assert.success();
+        let stderr = stderr_of(&result);
         assert_eq!(
-            fs::read_to_string(dir.path().join("out.fastq")).unwrap(),
-            input
+            stderr.lines().next().unwrap(),
+            format!("Noise scale: fixed a={value}")
         );
     }
 }
 
 #[test]
-fn assignments_only_streams_files_and_plain_or_gzip_stdin() {
+fn auto_calibration_changes_duplicate_assignments_on_noisy_reads() {
+    use ont_sim::{QualityConfig, add_quality_errors};
+
+    let mut rng = StdRng::seed_from_u64(904);
+    // Explicit synthetic miscalibration exercises an upward correction.
+    let model = QualityConfig::enabled(0.004, 0.1, 1.0, 2.5, 0.0);
+    let mut input = String::new();
+    for family in 0..300 {
+        let source = random_seq(2400, &mut rng);
+        for copy in 0..2 {
+            let (sequence, quality, _) =
+                add_quality_errors(source.as_bytes(), &model, [0.4, 0.3, 0.3], 1.0, &mut rng);
+            input.push_str(&format!(
+                "@r{family}_{copy}\n{}\n+\n{}\n",
+                String::from_utf8(sequence).unwrap(),
+                String::from_utf8(quality).unwrap()
+            ));
+        }
+    }
+    let merged_families = |extra: &[&str]| {
+        let mut args = vec!["--assignments", "assign.tsv"];
+        args.extend_from_slice(extra);
+        let (assert, dir) = run_on(&input, &args);
+        let result = assert.success();
+        let stderr = stderr_of(&result).into_owned();
+        let assignments = fs::read_to_string(dir.path().join("assign.tsv")).unwrap();
+        let exemplars: Vec<usize> = assignments
+            .lines()
+            .skip(1)
+            .map(|line| line.split_once('\t').unwrap().1.parse().unwrap())
+            .collect();
+        assert_eq!(exemplars.len(), 600);
+        for (idx, &exemplar) in exemplars.iter().enumerate() {
+            assert_eq!(idx / 2, exemplar / 2, "unrelated families merged");
+        }
+        let merged = exemplars.chunks_exact(2).filter(|p| p[0] == p[1]).count();
+        (merged, stderr)
+    };
+    let (automatic, stderr) = merged_families(&[]);
+    assert!(stderr.contains("status=estimated"), "{stderr}");
+    let (baseline, _) = merged_families(&["--noise-scale", "1"]);
+    assert!(
+        automatic >= baseline + 30,
+        "auto merged {automatic}/300 families, baseline merged {baseline}/300; {stderr}"
+    );
+    let (fixed, _) = merged_families(&["--noise-scale", "0.5"]);
+    assert!(
+        automatic >= fixed + 100,
+        "auto merged {automatic}/300 families, fixed 0.5 merged {fixed}/300; {stderr}"
+    );
+}
+
+#[test]
+fn pilot_stops_on_target_pairs_replays_and_continues_the_same_reader() {
+    let mut rng = StdRng::seed_from_u64(621);
+    let mut input = String::new();
+    let mut first = String::new();
+    let quality = "56".repeat(600);
+    for family in 0..500 {
+        let sequence = random_seq(1200, &mut rng);
+        if family == 0 {
+            first = sequence.clone();
+        }
+        for copy in 0..2 {
+            input.push_str(&format!(
+                "@r{family}_{copy} note\n{sequence}\n+note\n{quality}\n"
+            ));
+        }
+    }
+    let tail = random_seq(1200, &mut rng);
+    input.push_str(&format!("@tail_unique\n{tail}\n+\n{quality}\n"));
+    let best = format!(
+        "@tail_best note\n{first}\n+best note\n{}\n",
+        "?@".repeat(600)
+    );
+    input.push_str(&best);
+    let (assert, dir) = run_on(&input, &["--assignments", "assign.tsv"]);
+    let stderr = stderr_of(&assert.success()).into_owned();
+    for field in [
+        "status=estimated",
+        "pairs=500; reads=1000",
+        "stop=target-pairs",
+        "Total reads: 1002",
+    ] {
+        assert!(stderr.contains(field), "{stderr}");
+    }
+    let assignments = fs::read_to_string(dir.path().join("assign.tsv")).unwrap();
+    let rows: Vec<_> = assignments.lines().skip(1).collect();
+    assert_eq!(rows.len(), 1002);
+    for (idx, row) in rows.iter().enumerate() {
+        let expected = if idx < 2 || idx == 1001 {
+            1001
+        } else if idx == 1000 {
+            1000
+        } else {
+            idx / 2 * 2
+        };
+        assert_eq!(*row, format!("{idx}\t{expected}"));
+    }
+    let output = fs::read_to_string(dir.path().join("out.fastq")).unwrap();
+    assert!(output.ends_with(&best));
+    assert_eq!(output.lines().count(), 501 * 4);
+    let compressed = gzip(input.as_bytes());
+    let stdin_assignments = dir.path().join("stdin.tsv");
+    let result = Command::cargo_bin("dedup_ont_fastq")
+        .unwrap()
+        .arg("-")
+        .arg("--assignments")
+        .arg(&stdin_assignments)
+        .write_stdin(compressed)
+        .assert()
+        .success();
+    let stdin_stderr = stderr_of(&result);
+    assert_eq!(stdin_stderr.lines().next(), stderr.lines().next());
+    assert_eq!(fs::read_to_string(stdin_assignments).unwrap(), assignments);
+}
+
+#[test]
+fn assignments_only_replays_prefix_once_for_files_and_plain_or_gzip_stdin() {
     let mut rng = StdRng::seed_from_u64(811);
     let (a, b) = (random_seq(120, &mut rng), random_seq(120, &mut rng));
     for count in [4, 20_003] {
@@ -446,7 +588,16 @@ fn assignments_only_streams_files_and_plain_or_gzip_stdin() {
                 if let Some(payload) = payload {
                     cmd.write_stdin(payload);
                 }
-                cmd.assert().success();
+                let result = cmd.assert().success();
+                let stderr = stderr_of(&result);
+                assert!(
+                    stderr.contains(if fixed {
+                        "Noise scale: fixed"
+                    } else {
+                        "no usable qualities"
+                    }),
+                    "{stderr}"
+                );
                 assert_eq!(
                     fs::read_to_string(&assignments).unwrap(),
                     expected,

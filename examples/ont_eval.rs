@@ -11,7 +11,9 @@ mod dedup;
 mod quality_noise;
 
 use clap::Parser;
-use nao_dedup::ont::{OntDedupContext, OntMinimizerParams};
+use nao_dedup::ont::{
+    CalibrationOptions, OntDedupContext, OntMinimizerParams, estimate_noise_scale,
+};
 use ont_sim::{SimConfig, evaluate, simulate};
 use std::time::Instant;
 
@@ -23,6 +25,9 @@ struct Args {
     dedup: dedup::DedupArgs,
     #[command(flatten)]
     noise: quality_noise::QualityNoiseArgs,
+    /// Estimate a noise multiplier before deduplication
+    #[arg(long)]
+    auto_calibrate: bool,
 
     #[arg(long, default_value_t = OntMinimizerParams::default().kmer_len)]
     kmer_len: usize,
@@ -37,12 +42,24 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let dedup_params = args.noise.params(args.dedup.params());
+    let mut dedup_params = args.noise.params(args.dedup.params());
     dedup_params.validate()?;
     let minimizer_params =
         OntMinimizerParams::new(args.kmer_len, args.window_len, args.num_windows)?;
 
     let sim = simulate(&args.sim)?;
+    if args.auto_calibrate {
+        let report = estimate_noise_scale(
+            sim.reads
+                .iter()
+                .map(|r| (r.sequence.as_slice(), r.quality.as_slice())),
+            &dedup_params,
+            &minimizer_params,
+            &CalibrationOptions::default(),
+        );
+        eprintln!("{report}");
+        dedup_params.noise_scale = report.multiplier;
+    }
     let start = Instant::now();
     let mut ctx = OntDedupContext::new(dedup_params, minimizer_params);
     for (idx, read) in sim.reads.iter().enumerate() {
