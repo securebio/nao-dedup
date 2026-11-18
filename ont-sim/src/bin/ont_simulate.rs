@@ -16,6 +16,12 @@ struct Args {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let sim = simulate(&args.config)?;
+    if sim.saturated_positions > 0 {
+        eprintln!(
+            "quality event probabilities saturated at {} source positions",
+            sim.saturated_positions
+        );
+    }
     write_outputs(&sim, &args.fastq, &args.truth)?;
     eprintln!(
         "generated {} reads from {} molecules",

@@ -32,8 +32,8 @@ Truth and model semantics:
   it with independent per-base substitutions of probability D, always to a
   different base. D must be finite and in [0,1]. Coordinates remain comparable
   across genomes. For small D, pairwise divergence between two non-reference
-  genomes is about twice D (exactly `2D - 4D²/3` in expectation). D=0 preserves
-  the original independent-genome behavior and RNG draw order.
+  genomes is about twice D (exactly `2D - 4D²/3` in expectation). D=0 draws
+  independent genomes.
 - Each `molecule_id` is a separately drawn molecule, even when another molecule
   has identical endpoints. Coordinates are zero-based, half-open `[start,end)`
   on the forward genome, before PCR mutations, strand choice, and artifacts.
@@ -119,3 +119,46 @@ TSV stdout reports merge counts, rates, and the upper endpoint of the two-sided
 95% Wilson score interval. Divergence=0, offset=0 is a duplicate control: its
 merge rate measures true-pair recall. Other cells measure false merges between
 distinct molecules. Deduplication/minimizer flags match `ont_eval`.
+
+### Quality-conditioned errors (opt in)
+
+Add `--quality-conditioned --error-median <P> --error-sigma <S>
+--local-q-sigma <Q> --miscalibration <M> --latent-sigma <S>` to `ont_simulate`
+or `ont_eval`. All quality-model distribution inputs are required. Without this
+flag, error rates set event probabilities directly.
+
+In this mode `--sub-rate`, `--ins-rate`, and `--del-rate` are relative event
+weights, normalized to sum to one. A read's nominal probability is lognormal
+with the requested median and log standard deviation (clipped to one). Local
+normal variation in Phred units is rounded and clipped to Q0–Q93 **before**
+drawing errors. Each quality-derived probability is multiplied by the batch
+miscalibration factor, then `--unreported-error-floor` (default 0) is added.
+The sum is multiplied by an independent mean-one lognormal read multiplier
+(log standard deviation `--latent-sigma`) and capped at one. Zero latent sigma
+removes residual read dispersion. These multipliers affect errors, not qualities.
+Homopolymer enrichment changes the local event weights and nominal qualities.
+Local variation can occasionally round to constant qualities on very short reads.
+
+Events are categorical: a substitution changes the base, an insertion emits a
+random base before the retained source base, and a deletion emits nothing.
+Insertions share the pre-sampled source quality; deletions remove its quality.
+`add_quality_errors(seq, &QualityConfig, weights, homopolymer_mult, rng)` exposes
+this model publicly and returns `(sequence, quality, QualityErrorStats)`.
+The stats contain `[sub, ins, del]` event counts and the number of source positions
+whose event probability exceeds one; `Simulation` sums the saturation counts
+and `ont_simulate` reports them on stderr.
+`QualityConfig::enabled(median, sigma, local_q_sigma, miscalibration, latent_sigma)`
+constructs an enabled model with a zero unreported error floor.
+Call `QualityConfig::validate` first. Qualities always match emitted sequence
+lengths. Emitted-quality expected errors approximate actual event counts at low
+error rates; indel selection and changed lengths introduce second-order bias.
+Calibration of read-to-read edit distance needs separate validation because
+coincident errors and alternative alignments can mask events.
+
+Tests check determinism, seeded output of the independent-error model, substitution-only
+and indel calibration against **emitted** qualities, homopolymer enrichment, and
+batch scaling. This simple simulator does not model spatially correlated error
+bursts or systematic sequence-specific substitutions; those remain validation
+work, along with held-out protected strata, saturated groups, and broader length
+and accuracy sweeps. The near-miss report is a complete-pipeline check, not a
+comparator-only estimate or a guarantee for every stratum.

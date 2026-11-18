@@ -13,9 +13,176 @@ pub enum FamilyDist {
     Geometric,
 }
 
+/// Opt-in quality-conditioned model; all distribution inputs are runtime supplied.
+#[derive(Clone, Debug, Default, Args)]
+pub struct QualityConfig {
+    #[arg(long)]
+    pub quality_conditioned: bool,
+    /// Median nominal per-read error probability (lognormal, clipped to 1).
+    #[arg(long, required_if_eq("quality_conditioned", "true"))]
+    pub error_median: Option<f64>,
+    /// Standard deviation of log nominal error probability.
+    #[arg(long, required_if_eq("quality_conditioned", "true"))]
+    pub error_sigma: Option<f64>,
+    /// Local standard deviation in Phred units, before rounding to Q0–Q93.
+    #[arg(long, required_if_eq("quality_conditioned", "true"))]
+    pub local_q_sigma: Option<f64>,
+    /// Batch multiplier on quality-derived error probabilities.
+    #[arg(long, required_if_eq("quality_conditioned", "true"))]
+    pub miscalibration: Option<f64>,
+    /// Log standard deviation of the mean-one per-read latent multiplier.
+    #[arg(long, required_if_eq("quality_conditioned", "true"))]
+    pub latent_sigma: Option<f64>,
+    /// Additive event probability per source base, without changing reported Q.
+    #[arg(long, default_value_t = 0.0)]
+    pub unreported_error_floor: f64,
+}
+
+impl QualityConfig {
+    /// Construct an enabled quality model with no unreported error floor.
+    pub fn enabled(
+        error_median: f64,
+        error_sigma: f64,
+        local_q_sigma: f64,
+        miscalibration: f64,
+        latent_sigma: f64,
+    ) -> Self {
+        Self {
+            quality_conditioned: true,
+            error_median: Some(error_median),
+            error_sigma: Some(error_sigma),
+            local_q_sigma: Some(local_q_sigma),
+            miscalibration: Some(miscalibration),
+            latent_sigma: Some(latent_sigma),
+            unreported_error_floor: 0.0,
+        }
+    }
+
+    pub fn validate(&self, proportions: [f64; 3], homopolymer_mult: f64) -> Result<(), String> {
+        if !self.quality_conditioned {
+            return Ok(());
+        }
+        let positive = |v: Option<f64>| v.is_some_and(|x| x.is_finite() && x > 0.0);
+        let nonnegative = |v: Option<f64>| v.is_some_and(|x| x.is_finite() && x >= 0.0);
+        if !positive(self.error_median)
+            || self.error_median.is_some_and(|x| x > 1.0)
+            || !nonnegative(self.error_sigma)
+            || !positive(self.local_q_sigma)
+            || !nonnegative(self.miscalibration)
+            || !nonnegative(self.latent_sigma)
+            || !self.unreported_error_floor.is_finite()
+            || self.unreported_error_floor < 0.0
+            || proportions.iter().any(|x| !x.is_finite() || *x < 0.0)
+            || !proportions.iter().sum::<f64>().is_finite()
+            || proportions.iter().sum::<f64>() <= 0.0
+            || !homopolymer_mult.is_finite()
+            || homopolymer_mult < 0.0
+        {
+            return Err("quality mode requires 0 < error-median <= 1, finite error-sigma/latent-sigma/miscalibration/unreported-error-floor >= 0, local-q-sigma > 0, and finite nonnegative event weights with positive sum and homopolymer multiplier".into());
+        }
+        Ok(())
+    }
+}
+
+fn normal(rng: &mut StdRng) -> f64 {
+    (-2.0 * rng.sample::<f64, _>(Open01).ln()).sqrt()
+        * (std::f64::consts::TAU * rng.gen_range(0.0..1.0)).cos()
+}
+
+/// Sequencing event counts and source positions whose probability exceeded one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QualityErrorStats {
+    pub events: [usize; 3],
+    pub saturated_positions: usize,
+}
+
+/// Generate qualities first, then categorical sub/ins/del events from their
+/// probabilities times the batch multiplier, plus the per-base floor, all
+/// multiplied by the mean-one lognormal read multiplier and capped at one.
+/// Event weights are normalized. Insertions precede the retained source base and
+/// share its pre-sampled quality; deletions emit neither base nor quality.
+/// Homopolymer indel enrichment is reflected in the nominal qualities too.
+/// Panics unless quality mode is enabled and `config.validate(weights, mult)` passes.
+pub fn add_quality_errors(
+    s: &[u8],
+    config: &QualityConfig,
+    weights: [f64; 3],
+    mult: f64,
+    rng: &mut StdRng,
+) -> (Vec<u8>, Vec<u8>, QualityErrorStats) {
+    config
+        .validate(weights, mult)
+        .expect("invalid quality model");
+    assert!(config.quality_conditioned, "quality mode must be enabled");
+    let nominal_log =
+        (config.error_median.unwrap().ln() + config.error_sigma.unwrap() * normal(rng)).min(0.0);
+    let sigma = config.latent_sigma.unwrap();
+    let latent_log = sigma * (normal(rng) - 0.5 * sigma);
+    let batch_log = config.miscalibration.unwrap().ln();
+    let total = weights.iter().sum::<f64>();
+    let weights = weights.map(|w| w / total);
+    let (mut out, mut qual, mut counts) = (
+        Vec::with_capacity(s.len()),
+        Vec::with_capacity(s.len()),
+        [0; 3],
+    );
+    let mut saturated_positions = 0;
+    let mut start = 0;
+    while start < s.len() {
+        let mut end = start + 1;
+        while end < s.len() && s[end] == s[start] {
+            end += 1;
+        }
+        let hp = if end - start >= 3 { mult } else { 1.0 };
+        let local_weights = [weights[0], weights[1] * hp, weights[2] * hp];
+        let local_total = local_weights.iter().sum::<f64>();
+        for &b in &s[start..end] {
+            let q = (-10.0 / std::f64::consts::LN_10 * (nominal_log + local_total.ln())
+                + config.local_q_sigma.unwrap() * normal(rng))
+            .round()
+            .clamp(0.0, 93.0) as u8;
+            let quality_probability =
+                (-f64::from(q) * std::f64::consts::LN_10 / 10.0 + batch_log + latent_log).exp();
+            let unbounded =
+                quality_probability + (config.unreported_error_floor.ln() + latent_log).exp();
+            saturated_positions += usize::from(unbounded > 1.0);
+            let probability = unbounded.min(1.0);
+            if local_total == 0.0 || !rng.gen_bool(probability) {
+                out.push(b);
+                qual.push(q + 33);
+                continue;
+            }
+            let event = rng.gen_range(0.0..local_total);
+            if event < local_weights[0] {
+                out.push(substitution(b, rng));
+                qual.push(q + 33);
+                counts[0] += 1;
+            } else if event < local_weights[0] + local_weights[1] {
+                out.push(base(rng));
+                out.push(b);
+                qual.extend([q + 33, q + 33]);
+                counts[1] += 1;
+            } else {
+                counts[2] += 1;
+            }
+        }
+        start = end;
+    }
+    (
+        out,
+        qual,
+        QualityErrorStats {
+            events: counts,
+            saturated_positions,
+        },
+    )
+}
+
 /// Runtime model parameters. Sequencing error probabilities are deliberately required.
 #[derive(Clone, Debug, Args)]
 pub struct SimConfig {
+    #[command(flatten)]
+    pub quality: QualityConfig,
     #[arg(long, default_value_t = 1)]
     pub seed: u64,
     #[arg(long, default_value_t = 1)]
@@ -88,10 +255,16 @@ pub struct Read {
 pub struct Simulation {
     pub genomes: Vec<Vec<u8>>,
     pub reads: Vec<Read>,
+    /// Source positions with a quality-conditioned event probability above one.
+    pub saturated_positions: usize,
 }
 
 impl SimConfig {
     pub fn validate(&self) -> Result<(), String> {
+        self.quality.validate(
+            [self.sub_rate, self.ins_rate, self.del_rate],
+            self.homopolymer_indel_mult,
+        )?;
         let probabilities = [
             self.genome_divergence,
             self.sub_rate,
@@ -158,8 +331,7 @@ pub fn reverse_complement(s: &[u8]) -> Vec<u8> {
 }
 
 fn interval(c: &SimConfig, rng: &mut StdRng) -> (usize, usize) {
-    let z = (-2.0 * rng.sample::<f64, _>(Open01).ln()).sqrt()
-        * (std::f64::consts::TAU * rng.gen_range(0.0..1.0)).cos();
+    let z = normal(rng);
     let len = (c.len_median.ln() + c.len_sigma * z).exp().round() as usize;
     let len = len.clamp(c.len_min.min(c.genome_len), c.len_max.min(c.genome_len));
     let start = rng.gen_range(0..=c.genome_len - len);
@@ -274,6 +446,7 @@ pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
         })
         .collect();
     let mut reads = Vec::new();
+    let mut saturated_positions = 0;
     for molecule_id in 0..c.n_molecules {
         let genome_id = rng.gen_range(0..c.n_genomes);
         let (start, end) = match c.endpoints {
@@ -324,18 +497,31 @@ pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
             };
             s.extend(std::iter::repeat_n(b'A', polya_len));
             s = jitter_ends(s, c.end_jitter, &mut rng);
-            let (sequence, [n_sub, n_ins, n_del]) = add_errors(
-                &s,
-                c.sub_rate,
-                c.ins_rate,
-                c.del_rate,
-                c.homopolymer_indel_mult,
-                &mut rng,
-            );
-            let q = rng.gen_range(c.qual_min..=c.qual_max) as i16;
-            let quality: Vec<u8> = (0..sequence.len())
-                .map(|_| (q + rng.gen_range(-3..=3)).clamp(2, 50) as u8 + 33)
-                .collect();
+            let (sequence, quality, [n_sub, n_ins, n_del]) = if c.quality.quality_conditioned {
+                let (sequence, quality, stats) = add_quality_errors(
+                    &s,
+                    &c.quality,
+                    [c.sub_rate, c.ins_rate, c.del_rate],
+                    c.homopolymer_indel_mult,
+                    &mut rng,
+                );
+                saturated_positions += stats.saturated_positions;
+                (sequence, quality, stats.events)
+            } else {
+                let (sequence, counts) = add_errors(
+                    &s,
+                    c.sub_rate,
+                    c.ins_rate,
+                    c.del_rate,
+                    c.homopolymer_indel_mult,
+                    &mut rng,
+                );
+                let q = rng.gen_range(c.qual_min..=c.qual_max) as i16;
+                let quality: Vec<u8> = (0..sequence.len())
+                    .map(|_| (q + rng.gen_range(-3..=3)).clamp(2, 50) as u8 + 33)
+                    .collect();
+                (sequence, quality, counts)
+            };
             let mean_q = if quality.is_empty() {
                 0.0
             } else {
@@ -367,5 +553,9 @@ pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
         r.truth.read_idx = i;
         r.truth.read_name = format!("r{i}");
     }
-    Ok(Simulation { genomes, reads })
+    Ok(Simulation {
+        genomes,
+        reads,
+        saturated_positions,
+    })
 }
