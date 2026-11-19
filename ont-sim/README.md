@@ -140,13 +140,10 @@ constructs an enabled model with a zero unreported error floor.
 Call `QualityConfig::validate` first. Qualities always match emitted sequence
 lengths. Emitted-quality expected errors approximate actual event counts at low
 error rates; indel selection and changed lengths introduce second-order bias.
-Calibration of read-to-read edit distance needs separate validation because
+Event calibration does not establish calibration of pairwise edit distance:
 coincident errors and alternative alignments can mask events.
 
-Tests check same-build determinism, substitution-only
-and indel calibration against **emitted** qualities, homopolymer enrichment, and
-batch scaling. This simple simulator does not model spatially correlated error
-bursts or systematic sequence-specific substitutions; those remain validation
-work, along with held-out protected strata, saturated groups, and broader length
-and accuracy sweeps. The near-miss report is a complete-pipeline check, not a
-comparator-only estimate or a guarantee for every stratum.
+Tests check same-build determinism, substitution-only and indel calibration
+against **emitted** qualities, homopolymer enrichment, and batch scaling. The
+simulator does not model spatially correlated error bursts or systematic
+sequence-specific substitutions.
