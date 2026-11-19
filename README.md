@@ -4,11 +4,14 @@ Sequencing read deduplication with error-tolerant matching.
 
 This repository provides two things:
 
-1. **Command-line tool**: Deduplicates interleaved FASTQ.gz files directly
+1. **Command-line tools**: `dedup_interleaved_fastq` deduplicates Illumina
+   interleaved FASTQ.gz files, and `dedup_ont_fastq` deduplicates single-end
+   Oxford Nanopore reads (see [ONT (Nanopore) Deduplication](#ont-nanopore-deduplication))
 2. **Rust library**: For integrating deduplication into other Rust programs
 
 Both use minimizer-based bucketing for efficiency and tolerate small alignment
-shifts and sequencing errors.
+shifts and sequencing errors. The sections below describe the Illumina path
+unless they say otherwise.
 
 ## Features
 
@@ -98,7 +101,8 @@ Single-threaded; we parallelize by running multiple files concurrently.
 
 `dedup_ont_fastq` deduplicates single-end ONT reads. Copies of a fragment must
 share both endpoints and match within an indel-aware edit budget. Opposite
-strands match by default. See [docs/ont-design.md](docs/ont-design.md).
+strands match by default. Read ends should be fragment ends, so trim adapters,
+barcodes and primers first. See [docs/ont-design.md](docs/ont-design.md).
 
 ```bash
 cargo build --release --bin dedup_ont_fastq
@@ -134,22 +138,12 @@ For a single pass from plain or gzip stdin, write assignments only:
 cat input.fastq.gz | ./target/release/dedup_ont_fastq - --assignments assignments.tsv
 ```
 
-From Rust, use `nao_dedup::ont::OntDedupContext`: feed sequence/quality slices
-with `process_read_by_index`, then `finalize` and query `get_exemplar_index`.
-The matching parameters are `max_end_offset`, `protect_divergence`,
-`assumed_error_rate` and `rc_tolerant`, with the same defaults as the CLI.
-Quality calibration (1.2), per-base quality error floor (0.002), pair-distance
-CV (0.25), tail probability (0.05), and other matching constants are fixed
-engineering defaults. `OntMinimizerParams` remains configurable.
-The library panics on invalid parameters, malformed nonempty Phred+33
-qualities, or nonempty quality/sequence length mismatches. The CLI reports
-these as errors.
-`ont::validate_quality` checks the byte range without panicking.
+The CLI targets Unix-like systems. For use from Rust, see
+[ONT library](#ont-library).
 
-ONT integration tests share a small deterministic generator in
-`tests/common/sim.rs`, with explicit illustrative error parameters. The scale
-benchmark streams generated reads and reports generation time, deduplication
-time, and peak RSS. Supply its error/quality inputs at runtime; for example:
+The `ont_scale` example benchmarks the deduplicator on generated reads and
+reports generation time, deduplication time, and peak RSS (Linux). Supply its
+error/quality inputs at runtime; for example:
 
 ```bash
 cargo run --release --example ont_scale -- --reads 50000 \
@@ -159,6 +153,8 @@ cargo run --release --example ont_scale -- --reads 50000 \
 ```
 
 Use `--genomes 1 --genome-len 7000` to benchmark saturated seed groups.
+Generating reads takes longer than deduplicating them; the two are timed
+separately.
 
 ---
 
@@ -228,6 +224,22 @@ let (total_processed, unique_clusters) = ctx.stats();
 
 See `src/dedup_interleaved_fastq.rs` for a complete example of how to integrate
 this library with file I/O.
+
+### ONT library
+
+From Rust, use `nao_dedup::ont::OntDedupContext`: feed sequence/quality slices
+with `process_read_by_index`, then `finalize` and query `get_exemplar_index`.
+The matching parameters are `max_end_offset`, `protect_divergence`,
+`assumed_error_rate` and `rc_tolerant`, with the same defaults as the CLI.
+Quality calibration (1.2), per-base quality error floor (0.002), pair-distance
+CV (0.25), tail probability (0.05), and other matching constants are fixed
+engineering defaults. `OntMinimizerParams` remains configurable.
+The library panics on invalid parameters, malformed nonempty Phred+33
+qualities, or nonempty quality/sequence length mismatches. The CLI reports
+these as errors.
+`ont::validate_quality` checks the byte range without panicking.
+
+See `src/dedup_ont_fastq.rs` for an example with file I/O.
 
 ---
 
@@ -362,6 +374,9 @@ The test suite includes:
   offsets, and errors
 - **CLI tests**: Located in `tests/cli_tests.rs`, testing the command-line
   binary with gzipped FASTQ files
+- **ONT tests**: `tests/ont_tests.rs` and `tests/ont_cli_tests.rs`, plus inline
+  tests in `src/ont/`. Dataset tests use a small deterministic read generator
+  in `tests/common/sim.rs` with explicit illustrative error parameters
 
 To run specific test suites:
 ```bash

@@ -1,7 +1,9 @@
 //! Stream generated reads through the production deduplicator; retain only
 //! genomes, molecule coordinates and shuffled molecule IDs, never all reads.
 //! Error/quality parameters are required runtime inputs, not instrument defaults.
-//! Use --genomes 1 --genome-len 7000 for saturated seed groups.
+//! Use --genomes 1 --genome-len 7000 for saturated seed groups. Generating
+//! reads takes longer than deduplicating them; the two are timed separately.
+//! Peak RSS comes from /proc (Linux) and prints NaN elsewhere.
 //!
 //! cargo run --release --example ont_scale -- --reads 50000 \
 //!   --sub-weight 0.4 --ins-weight 0.3 --del-weight 0.3 \
