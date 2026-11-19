@@ -1,12 +1,13 @@
 use super::*;
 use clap::Parser;
 
+#[derive(Parser)]
+struct Args {
+    #[command(flatten)]
+    config: SimConfig,
+}
+
 fn config() -> SimConfig {
-    #[derive(Parser)]
-    struct Args {
-        #[command(flatten)]
-        config: SimConfig,
-    }
     Args::parse_from([
         "sim",
         "--sub-rate",
@@ -22,18 +23,14 @@ fn config() -> SimConfig {
 fn truth(i: usize, molecule: usize) -> Truth {
     Truth {
         read_idx: i,
-        read_name: format!("r{i}"),
         molecule_id: molecule,
         genome_id: 0,
         mol_start: molecule * 10,
         mol_end: molecule * 10 + 100,
         is_rc: false,
-        foldback_len: 0,
-        polya_len: 0,
         n_sub: 0,
         n_ins: 0,
         n_del: 0,
-        mean_q: 20.0,
     }
 }
 
@@ -134,57 +131,7 @@ fn lost_molecule_can_span_clusters_while_its_genome_survives() {
 }
 
 #[test]
-fn zero_divergence_preserves_seeded_output() {
-    let mut c = config();
-    c.n_genomes = 3;
-    c.genome_len = 20;
-    c.n_molecules = 3;
-    c.len_min = 8;
-    c.len_max = 12;
-    c.len_median = 10.0;
-    c.family_mean = 1.0;
-    let s = simulate(&c).unwrap();
-    let output: Vec<_> = s
-        .reads
-        .iter()
-        .map(|r| {
-            let t = &r.truth;
-            (
-                r.sequence.as_slice(),
-                r.quality.as_slice(),
-                t.molecule_id,
-                t.genome_id,
-                t.mol_start,
-                t.mol_end,
-                t.is_rc,
-            )
-        })
-        .collect();
-    assert_eq!(
-        output,
-        vec![
-            (&b"CATAGATGGC"[..], &b"88=9==8>:9"[..], 0, 0, 9, 19, true),
-            (
-                &b"ACTGGAAGGTGA"[..],
-                &b".1+/,.0,0.-0"[..],
-                2,
-                1,
-                5,
-                17,
-                true
-            ),
-            (&b"GATGGCGTC"[..], &b"*0/+.--//"[..], 1, 0, 6, 15, true),
-        ]
-    );
-}
-
-#[test]
 fn related_genomes_copy_reference_with_substitutions_only() {
-    #[derive(Parser)]
-    struct Args {
-        #[command(flatten)]
-        config: SimConfig,
-    }
     let parsed = Args::try_parse_from([
         "sim",
         "--sub-rate",
@@ -256,7 +203,6 @@ fn deterministic_and_reverse_complement_truth() {
         assert_eq!(r.sequence, expected);
         assert_eq!(r.quality.len(), r.sequence.len());
         assert_eq!(t.read_idx, i);
-        assert_eq!(t.read_name, format!("r{i}"));
     }
     c.seed += 1;
     assert_ne!(a, simulate(&c).unwrap());
@@ -299,30 +245,13 @@ fn errors_follow_requested_probabilities() {
 }
 
 #[test]
-fn foldbacks_tails_and_hotspot_collisions() {
+fn hotspot_collisions() {
     let mut c = config();
     c.n_molecules = 30;
     c.endpoints = Endpoints::Hotspot;
     c.n_hotspots = 1;
     c.hotspot_jitter = 0;
-    c.foldback_prob = 1.0;
-    c.foldback_min_frac = 0.5;
-    c.foldback_max_frac = 0.5;
-    c.polya_prob = 1.0;
-    c.polya_min = 7;
-    c.polya_max = 7;
     let s = simulate(&c).unwrap();
-    for r in &s.reads {
-        let t = &r.truth;
-        let n = t.mol_end - t.mol_start;
-        assert_eq!(t.foldback_len, n / 2);
-        assert_eq!(
-            &r.sequence[n..n + n / 2],
-            simulate::reverse_complement(&r.sequence[n - n / 2..n])
-        );
-        assert_eq!(&r.sequence[n + n / 2..], b"AAAAAAA");
-        assert_eq!(t.polya_len, 7);
-    }
     let truth: Vec<_> = s.reads.iter().map(|r| r.truth.clone()).collect();
     let assignments: Vec<_> = truth.iter().map(|t| (t.read_idx, 0)).collect();
     assert_eq!(
@@ -342,12 +271,9 @@ fn pair_metrics_and_identifiability() {
     let merged = evaluate(&t, &[(0, 0), (1, 0), (2, 0), (3, 0)]).unwrap();
     assert_eq!(merged.molecule.precision(), Some(1.0 / 3.0));
     assert_eq!(merged.molecule.recall(), Some(1.0));
-    assert_eq!((merged.merges, merged.splits), (1, 0));
-    assert_eq!(merged.dedup_count_bias, Some(-0.5));
     let split = evaluate(&t, &[(0, 0), (1, 1), (2, 2), (3, 3)]).unwrap();
     assert_eq!(split.molecule.precision(), None);
     assert_eq!(split.molecule.recall(), Some(0.0));
-    assert_eq!((split.merges, split.splits), (0, 2));
     let mut identical = t.clone();
     for row in &mut identical {
         row.mol_start = 0;
@@ -355,50 +281,26 @@ fn pair_metrics_and_identifiability() {
     }
     let e = evaluate(&identical, &[(0, 0), (1, 0), (2, 0), (3, 0)]).unwrap();
     assert_eq!(e.identifiability.precision(), Some(1.0));
+    assert_eq!(e.identifiability.recall(), Some(1.0));
     assert_eq!(e.molecule.precision(), Some(1.0 / 3.0));
-    assert_eq!((e.merges, e.splits), (1, 0));
-    assert_eq!((e.identifiability_merges, e.identifiability_splits), (0, 0));
     let e = evaluate(&identical, &[(0, 0), (1, 1), (2, 2), (3, 3)]).unwrap();
-    assert_eq!((e.merges, e.splits), (0, 2));
-    assert_eq!((e.identifiability_merges, e.identifiability_splits), (0, 1));
-    // Two reads from each of two distinct intervals in one cluster: one merge
-    // (counted per cluster, not per read) under both truths.
-    let e = evaluate(&t, &[(0, 0), (1, 0), (2, 0), (3, 0)]).unwrap();
-    assert_eq!((e.identifiability_merges, e.identifiability_splits), (1, 0));
-    assert_eq!(evaluate(&[], &[]).unwrap().dedup_count_bias, None);
+    assert_eq!(e.identifiability.precision(), None);
+    assert_eq!(e.identifiability.recall(), Some(0.0));
+    let empty = evaluate(&[], &[]).unwrap();
+    assert_eq!(empty.molecule.precision(), None);
+    assert_eq!(empty.molecule.recall(), None);
+    assert_eq!(empty.identifiability.precision(), None);
+    assert_eq!(empty.identifiability.recall(), None);
 }
 
 #[test]
-fn stratified_recall_and_assignment_validation() {
+fn assignment_order_and_validation() {
     let mut t: Vec<_> = (0..4).map(|i| truth(i, 0)).collect();
-    t[2].foldback_len = 10;
-    t[3].foldback_len = 10;
-    t[1].is_rc = true;
-    t[3].is_rc = true;
     let a = [(3, 2), (0, 0), (2, 2), (1, 0)]; // input order must not matter
     let e = evaluate(&t, &a).unwrap();
-    assert_eq!(
-        e.foldback.iter().map(|s| s.true_pairs).collect::<Vec<_>>(),
-        [1, 4, 1]
-    );
-    assert_eq!(
-        e.foldback
-            .iter()
-            .map(|s| s.recovered_pairs)
-            .collect::<Vec<_>>(),
-        [1, 0, 1]
-    );
-    assert_eq!(
-        e.strand.iter().map(|s| s.true_pairs).collect::<Vec<_>>(),
-        [2, 4]
-    );
-    assert_eq!(
-        e.strand
-            .iter()
-            .map(|s| s.recovered_pairs)
-            .collect::<Vec<_>>(),
-        [0, 2]
-    );
+    assert_eq!(e.molecule.true_pairs, 6);
+    assert_eq!(e.molecule.predicted_pairs, 2);
+    assert_eq!(e.molecule.recovered_pairs, 2);
     for bad in [
         vec![(0, 0)],
         vec![(0, 0), (1, 0), (2, 2), (2, 2)],
@@ -412,39 +314,10 @@ fn stratified_recall_and_assignment_validation() {
 }
 
 #[test]
-fn pcr_sublineage_and_end_jitter() {
+fn end_jitter_preserves_the_interior() {
     let mut c = config();
     c.n_molecules = 20;
-    c.pcr_error_prob = 1.0;
     c.rc_prob = 0.0;
-    let s = simulate(&c).unwrap();
-    for molecule in 0..c.n_molecules {
-        let family: Vec<_> = s
-            .reads
-            .iter()
-            .filter(|r| r.truth.molecule_id == molecule)
-            .collect();
-        let t = &family[0].truth;
-        let template = &s.genomes[t.genome_id][t.mol_start..t.mol_end];
-        let changes: Vec<_> = family
-            .iter()
-            .filter_map(|r| {
-                let differences: Vec<_> = r
-                    .sequence
-                    .iter()
-                    .zip(template)
-                    .enumerate()
-                    .filter(|(_, (a, b))| a != b)
-                    .map(|(i, (a, _))| (i, *a))
-                    .collect();
-                assert!(differences.len() <= 1);
-                differences.first().copied()
-            })
-            .collect();
-        assert_eq!(changes.len(), family.len() / 2);
-        assert!(changes.windows(2).all(|w| w[0] == w[1]));
-    }
-    c.pcr_error_prob = 0.0;
     c.end_jitter = 7;
     let s = simulate(&c).unwrap();
     for r in s.reads {
@@ -460,7 +333,7 @@ fn pcr_sublineage_and_end_jitter() {
 }
 
 #[test]
-fn rejects_invalid_parameters_and_tsv() {
+fn rejects_invalid_parameters_and_truth() {
     let mut c = config();
     for rate in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
         c.ins_rate = rate;
@@ -469,14 +342,6 @@ fn rejects_invalid_parameters_and_tsv() {
     c.ins_rate = 0.0;
     c.family_mean = 0.5;
     assert!(simulate(&c).is_err());
-    for input in [
-        "",
-        "read_idx,exemplar_idx\n0,0\n",
-        "read_idx\texemplar_idx\n0\tbogus\n",
-        "read_idx\texemplar_idx\n0\t0\textra\n",
-    ] {
-        assert!(read_assignments(input.as_bytes()).is_err());
-    }
     let mut t = vec![truth(10, 0), truth(20, 0)];
     assert_eq!(
         evaluate(&t, &[(20, 10), (10, 10)])
@@ -536,11 +401,6 @@ fn errors_change_bases_and_homopolymers_modify_indels() {
 
 #[test]
 fn quality_mode_requires_explicit_model_and_emits_varied_qualities() {
-    #[derive(Parser)]
-    struct Args {
-        #[command(flatten)]
-        config: SimConfig,
-    }
     let base = [
         "sim",
         "--sub-rate",
@@ -652,63 +512,6 @@ fn quality_model_validation_and_disabled_rng_identity() {
 }
 
 #[test]
-fn noisy_legacy_output_stays_bit_identical_without_quality_mode() {
-    // Sequencing errors preserve deterministic reads and truth.
-    let mut c = config();
-    c.n_genomes = 3;
-    c.genome_len = 20;
-    c.n_molecules = 3;
-    c.len_min = 8;
-    c.len_max = 12;
-    c.len_median = 10.0;
-    c.family_mean = 1.0;
-    c.sub_rate = 0.2;
-    c.ins_rate = 0.1;
-    c.del_rate = 0.1;
-    let simulation = simulate(&c).unwrap();
-    let actual: Vec<_> = simulation
-        .reads
-        .iter()
-        .map(|r| {
-            let t = &r.truth;
-            (
-                r.sequence.as_slice(),
-                r.quality.as_slice(),
-                t.molecule_id,
-                (t.mol_start, t.mol_end, t.is_rc),
-                [t.n_sub, t.n_ins, t.n_del],
-            )
-        })
-        .collect();
-    assert_eq!(
-        actual,
-        [
-            (
-                &b"GATACCTG"[..],
-                &b"<8::987="[..],
-                1,
-                (6, 15, true),
-                [2, 1, 2]
-            ),
-            (
-                &b"CATATTGG"[..],
-                &b"-)--(.*)"[..],
-                0,
-                (9, 19, true),
-                [1, 0, 2]
-            ),
-            (
-                &b"TACAACGCCGACA"[..],
-                &b"2655240232234"[..],
-                2,
-                (3, 15, false),
-                [6, 1, 0]
-            ),
-        ]
-    );
-}
-
-#[test]
 fn additive_floor_events_follow_quality_plus_floor_and_latent_clipping() {
     use rand::{SeedableRng, rngs::StdRng};
     for (factor, floor, latent) in [
@@ -772,17 +575,4 @@ fn latent_multiplier_applies_to_floor_before_probability_clipping() {
     }
     assert!(saturated > 0 && saturated < source.len() * 1000 / 2);
     assert!((0.30..0.48).contains(&(events as f64 / (source.len() * 1000) as f64)));
-    let mut sim = config();
-    sim.quality = c;
-    sim.quality.latent_sigma = Some(0.0);
-    sim.quality.unreported_error_floor = 2.0;
-    sim.sub_rate = 1.0;
-    sim.ins_rate = 0.0;
-    sim.del_rate = 0.0;
-    sim.n_molecules = 2;
-    let result = simulate(&sim).unwrap();
-    assert_eq!(
-        result.saturated_positions,
-        result.reads.iter().map(|r| r.sequence.len()).sum::<usize>()
-    );
 }

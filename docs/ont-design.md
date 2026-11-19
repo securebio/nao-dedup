@@ -121,15 +121,14 @@ throughput and peak memory at that scale.
 - **Simulator.** `ont-sim` generates genomes, optionally related by a set
   divergence, and molecules with defined endpoints, including dense coverage
   and nearby distinct endpoints. PCR families get independent substitution,
-  insertion and deletion errors, with optional foldback tails, homopolymer
-  tails and reverse complements. Quality-conditioned simulation draws
+  insertion and deletion errors, with homopolymer indel enrichment and optional
+  reverse complements. Quality-conditioned simulation draws
   qualities before errors, with configurable calibration, unreported errors
   and read-level variability. Simulation error-model parameters are supplied
   at runtime.
 - **Metrics.** The evaluator reports pair-level precision and recall against
-  molecule truth and endpoint-identifiability truth, merges, splits,
-  duplicate-count bias, and recall by strand and foldback status. `ont_eval`
-  adds timing and work counters.
+  molecule truth and endpoint-identifiability truth. `ont_eval` adds timing
+  and work counters.
 - **Scale test.** `examples/ont_scale.rs` streams synthetic reads without
   storing them to measure throughput and peak memory at tens of millions of
   reads.

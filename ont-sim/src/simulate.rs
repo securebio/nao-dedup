@@ -8,11 +8,6 @@ pub enum Endpoints {
     Hotspot,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum FamilyDist {
-    Geometric,
-}
-
 /// Opt-in quality-conditioned model; all distribution inputs are runtime supplied.
 #[derive(Clone, Debug, Default, Args)]
 pub struct QualityConfig {
@@ -208,12 +203,9 @@ pub struct SimConfig {
     pub n_hotspots: usize,
     #[arg(long, default_value_t = 3)]
     pub hotspot_jitter: usize,
-    #[arg(long, value_enum, default_value = "geometric")]
-    pub family_dist: FamilyDist,
+    /// Mean family size for a geometric distribution on 1, 2, ... .
     #[arg(long, default_value_t = 3.0)]
     pub family_mean: f64,
-    #[arg(long, default_value_t = 0.0)]
-    pub pcr_error_prob: f64,
     #[arg(long, default_value_t = 0.5)]
     pub rc_prob: f64,
     #[arg(long)]
@@ -224,18 +216,6 @@ pub struct SimConfig {
     pub del_rate: f64,
     #[arg(long, default_value_t = 1.0)]
     pub homopolymer_indel_mult: f64,
-    #[arg(long, default_value_t = 0.0)]
-    pub foldback_prob: f64,
-    #[arg(long, default_value_t = 0.1)]
-    pub foldback_min_frac: f64,
-    #[arg(long, default_value_t = 0.5)]
-    pub foldback_max_frac: f64,
-    #[arg(long, default_value_t = 0.0)]
-    pub polya_prob: f64,
-    #[arg(long, default_value_t = 10)]
-    pub polya_min: usize,
-    #[arg(long, default_value_t = 100)]
-    pub polya_max: usize,
     #[arg(long, default_value_t = 0)]
     pub end_jitter: usize,
     #[arg(long, default_value_t = 10)]
@@ -255,8 +235,6 @@ pub struct Read {
 pub struct Simulation {
     pub genomes: Vec<Vec<u8>>,
     pub reads: Vec<Read>,
-    /// Source positions with a quality-conditioned event probability above one.
-    pub saturated_positions: usize,
 }
 
 impl SimConfig {
@@ -271,14 +249,9 @@ impl SimConfig {
             self.ins_rate,
             self.del_rate,
             self.rc_prob,
-            self.pcr_error_prob,
-            self.foldback_prob,
-            self.polya_prob,
-            self.foldback_min_frac,
-            self.foldback_max_frac,
         ];
         if probabilities.iter().any(|p| !(0.0..=1.0).contains(p)) {
-            return Err("probabilities and foldback fractions must be finite and in [0,1]".into());
+            return Err("probabilities must be finite and in [0,1]".into());
         }
         if self.n_genomes == 0
             || self.genome_len == 0
@@ -293,8 +266,6 @@ impl SimConfig {
             || self.family_mean < 1.0
             || !self.homopolymer_indel_mult.is_finite()
             || self.homopolymer_indel_mult < 0.0
-            || self.foldback_min_frac > self.foldback_max_frac
-            || self.polya_min > self.polya_max
             || self.qual_min < 2
             || self.qual_max > 50
             || self.qual_min > self.qual_max
@@ -411,11 +382,10 @@ pub fn add_errors(
     (out, counts)
 }
 
-/// Generate and shuffle an in-memory dataset. Indices and names refer to output order.
+/// Generate and shuffle an in-memory dataset. Indices refer to the shuffled read order.
 pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
     c.validate()?;
     let mut rng = StdRng::seed_from_u64(c.seed);
-    // Keep the zero-divergence path's draws exactly as before.
     let mut genomes: Vec<Vec<u8>> = Vec::with_capacity(c.n_genomes);
     for i in 0..c.n_genomes {
         let genome = if i == 0 || c.genome_divergence == 0.0 {
@@ -434,19 +404,15 @@ pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
         };
         genomes.push(genome);
     }
+    let n_hotspots = if matches!(c.endpoints, Endpoints::Hotspot) {
+        c.n_hotspots
+    } else {
+        0
+    };
     let hotspots: Vec<Vec<_>> = (0..c.n_genomes)
-        .map(|_| {
-            (0..if matches!(c.endpoints, Endpoints::Hotspot) {
-                c.n_hotspots
-            } else {
-                0
-            })
-                .map(|_| interval(c, &mut rng))
-                .collect()
-        })
+        .map(|_| (0..n_hotspots).map(|_| interval(c, &mut rng)).collect())
         .collect();
     let mut reads = Vec::new();
-    let mut saturated_positions = 0;
     for molecule_id in 0..c.n_molecules {
         let genome_id = rng.gen_range(0..c.n_genomes);
         let (start, end) = match c.endpoints {
@@ -465,37 +431,12 @@ pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
         while !rng.gen_bool(1.0 / c.family_mean) {
             k += 1;
         }
-        let mut lineage = vec![false; k];
-        let mutation = if rng.gen_bool(c.pcr_error_prob) {
-            lineage[..k / 2].fill(true);
-            lineage.shuffle(&mut rng);
-            let pos = rng.gen_range(0..template.len());
-            Some((pos, substitution(template[pos], &mut rng)))
-        } else {
-            None
-        };
-        for mutated in lineage {
+        for _ in 0..k {
             let mut s = template.to_vec();
-            if let Some((pos, b)) = mutation.filter(|_| mutated) {
-                s[pos] = b;
-            }
             let is_rc = rng.gen_bool(c.rc_prob);
             if is_rc {
                 s = reverse_complement(&s);
             }
-            let foldback_len = if rng.gen_bool(c.foldback_prob) {
-                (s.len() as f64 * rng.gen_range(c.foldback_min_frac..=c.foldback_max_frac)).floor()
-                    as usize
-            } else {
-                0
-            };
-            s.extend(reverse_complement(&s[s.len() - foldback_len..]));
-            let polya_len = if rng.gen_bool(c.polya_prob) {
-                rng.gen_range(c.polya_min..=c.polya_max)
-            } else {
-                0
-            };
-            s.extend(std::iter::repeat_n(b'A', polya_len));
             s = jitter_ends(s, c.end_jitter, &mut rng);
             let (sequence, quality, [n_sub, n_ins, n_del]) = if c.quality.quality_conditioned {
                 let (sequence, quality, stats) = add_quality_errors(
@@ -505,7 +446,6 @@ pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
                     c.homopolymer_indel_mult,
                     &mut rng,
                 );
-                saturated_positions += stats.saturated_positions;
                 (sequence, quality, stats.events)
             } else {
                 let (sequence, counts) = add_errors(
@@ -522,28 +462,19 @@ pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
                     .collect();
                 (sequence, quality, counts)
             };
-            let mean_q = if quality.is_empty() {
-                0.0
-            } else {
-                quality.iter().map(|b| (b - 33) as f64).sum::<f64>() / quality.len() as f64
-            };
             reads.push(Read {
                 sequence,
                 quality,
                 truth: Truth {
                     read_idx: 0,
-                    read_name: String::new(),
                     molecule_id,
                     genome_id,
                     mol_start: start,
                     mol_end: end,
                     is_rc,
-                    foldback_len,
-                    polya_len,
                     n_sub,
                     n_ins,
                     n_del,
-                    mean_q,
                 },
             });
         }
@@ -551,11 +482,6 @@ pub fn simulate(c: &SimConfig) -> Result<Simulation, String> {
     reads.shuffle(&mut rng);
     for (i, r) in reads.iter_mut().enumerate() {
         r.truth.read_idx = i;
-        r.truth.read_name = format!("r{i}");
     }
-    Ok(Simulation {
-        genomes,
-        reads,
-        saturated_positions,
-    })
+    Ok(Simulation { genomes, reads })
 }
