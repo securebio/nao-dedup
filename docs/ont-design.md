@@ -3,9 +3,9 @@
 The `ont` library and `dedup_ont_fastq` CLI identify duplicates among single-end
 Oxford Nanopore reads. Two reads are duplicates when they share both fragment
 endpoints within `max_end_offset` (default 2 bases) and their sequences match
-within a quality-dependent, indel-aware edit budget. Reverse-complement matching is on by default;
-directional libraries can turn it off. Truncated copies sharing only one
-endpoint are outside this definition.
+within a quality-dependent, indel-aware edit budget. Reverse-complement
+matching is on by default; directional libraries can turn it off. Truncated
+copies sharing only one endpoint are outside this definition.
 
 Endpoints are the main evidence. Independent molecules from the same genome
 region can be nearly identical in sequence, and a tight endpoint tolerance is
@@ -31,13 +31,14 @@ comparison leader; a new read joins the first leader it matches, and clusters
 never merge. The exemplar is the member with the highest mean Phred quality,
 then the longest. Members match their leader, not necessarily the exemplar.
 `finalize()` resolves assignments to exemplars and frees the seed index,
-leader sequences and comparison buffers, keeping only assignments.
+leader sequences and comparison buffers, keeping only assignments and each
+cluster's exemplar.
 
 Canonical minimizers from adjacent windows at both ends retrieve candidates. A
 candidate needs seed evidence at both ends in a consistent orientation. Seeds
 are visited from the ends inward, and postings are sorted by offset, so only
 postings whose offset from the end differs by at most `max_end_offset + 3`
-plus 4% of that offset (indel drift) are visited. Beyond the endpoint window
+plus 4% of the larger offset, rounded up (indel drift) are visited. Beyond the endpoint window
 and in repeats this filter is a heuristic and can miss a duplicate. Evidence
 picks the orientation to try first; the other allowed orientation is tried if
 needed.
@@ -69,14 +70,15 @@ largest integer up to the 12% cap with `P(D ≤ T) < 5%` when `D` follows a
 negative binomial with mean `mu` and variance
 `mu + (0.25 × (noise_a + noise_b))^2` (Poisson when the noise is zero); the
 extra term allows for noise misprediction. If no such `T ≥ 0` exists, the pair
-cannot merge. Longer reads carry more evidence about strain
-differences and get more room relative to their noise; short or noisy reads
-may stay unmerged, even when identical.
+cannot merge. Longer reads carry more evidence about strain differences and
+get more room relative to their noise; short or noisy reads may stay unmerged,
+even when identical.
 
 The 5% is per comparison under this model, not a bound on cluster
 contamination: a read can meet several leaders, and model mismatch changes the
 real rate. The quality coefficients, dispersion, tail probability, endpoint
-window and cap are fixed engineering defaults.
+window and its error allowance, whole-read cap and seed drift are fixed
+engineering defaults.
 
 ## CLI and storage
 
@@ -92,9 +94,9 @@ bytes, plus a 4-byte expected-error summary. Assignments use one `u32` per
 read. The seed index maps hashes to offset-sorted 8-byte postings, up to 16
 per leader by default. In synthetic tests with 0.5–4.5 kb reads, peak memory
 was about 0.9 KB per leader when leaders shared seeds and 1.4 KB when every
-seed was distinct, so tens of millions of unique reads fit in 64 GB. Packed
-sequence costs a quarter byte per base, so longer reads cost proportionally
-more.
+seed was distinct, so tens of millions of unique reads of that length fit in
+64 GB. Packed sequence costs a quarter byte per base, so longer reads cost
+proportionally more.
 
 ## Validation
 
