@@ -1,25 +1,26 @@
 //! Scale benchmark: stream many simulated ONT reads through OntDedupContext
-//! and report throughput and peak memory. Unlike `ont-sim`, reads are
-//! generated on the fly and never stored, so tens of millions are feasible.
+//! and report deduplication time, generation time, and peak memory. Reads use
+//! ont-sim's quality-conditioned errors and are never stored.
 //!
 //!   cargo run --release --example ont_scale -- --reads 10000000 \
-//!     --sub-rate <P> --ins-rate <P> --del-rate <P>
+//!     --sub-weight <W> --ins-weight <W> --del-weight <W> \
+//!     --error-median <P> --error-sigma <S> --local-q-sigma <Q> \
+//!     --miscalibration <M> --latent-sigma <S>
 //!
-//! Constant qualities exercise the assumed-error-rate path.
-//!
-//! Error rates are required and illustrative. Molecules are drawn uniformly
-//! over the genomes, each family gets a geometric number of reads, and reads
-//! arrive in random order. Errors are placed by geometric skipping, so
-//! generation is cheap relative to deduplication. The rates are per-event
-//! probabilities at each step through the template; an insertion doesn't
-//! advance the template, so insertions per template base come out slightly
-//! higher than `--ins-rate` (rate / (1 - rate)).
+//! Error and quality inputs are required runtime arguments for ont-sim's
+//! `add_quality_errors` (see ont-sim/README.md), here without homopolymer
+//! enrichment or an unreported error floor. Molecules are drawn uniformly over
+//! the genomes, each family gets a geometric number of reads, and reads arrive
+//! in random order. Use `--genomes 1 --genome-len 7000` to exercise saturated
+//! seed groups. Generating quality-conditioned reads can take longer than
+//! deduplicating them; the two are timed separately.
 
 #[path = "common/dedup.rs"]
 mod dedup;
 
 use clap::Parser;
 use nao_dedup::ont::{OntDedupContext, OntMinimizerParams};
+use ont_sim::{QualityConfig, add_quality_errors};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -44,12 +45,30 @@ struct Args {
     len_min: usize,
     #[arg(long, default_value_t = 4500)]
     len_max: usize,
+    /// Relative substitution event weight (normalized with indel weights).
     #[arg(long)]
-    sub_rate: f64,
+    sub_weight: f64,
+    /// Relative insertion event weight.
     #[arg(long)]
-    ins_rate: f64,
+    ins_weight: f64,
+    /// Relative deletion event weight.
     #[arg(long)]
-    del_rate: f64,
+    del_weight: f64,
+    /// Median nominal per-read error probability (lognormal, clipped to 1).
+    #[arg(long)]
+    error_median: f64,
+    /// Standard deviation of log nominal error probability.
+    #[arg(long)]
+    error_sigma: f64,
+    /// Local standard deviation in Phred units, before rounding to Q0–Q93.
+    #[arg(long)]
+    local_q_sigma: f64,
+    /// Batch multiplier on quality-derived error probabilities.
+    #[arg(long)]
+    miscalibration: f64,
+    /// Log standard deviation of the mean-one per-read latent multiplier.
+    #[arg(long)]
+    latent_sigma: f64,
     #[arg(long, default_value_t = 1)]
     seed: u64,
 }
@@ -61,39 +80,6 @@ fn peak_rss_mb() -> f64 {
         .find_map(|l| l.strip_prefix("VmHWM:"))
         .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<f64>().ok())
         .map_or(f64::NAN, |kb| kb / 1024.0)
-}
-
-/// Copy `template` into `out` with sequencing errors, placing each kind of
-/// error by geometric skipping over template positions.
-fn sequence(template: &[u8], args: &Args, rng: &mut StdRng, out: &mut Vec<u8>) {
-    let total = args.sub_rate + args.ins_rate + args.del_rate;
-    out.clear();
-    let mut pos = 0;
-    while pos < template.len() {
-        // Bases until the next error of any kind.
-        let skip = if total > 0.0 {
-            let u: f64 = rng.r#gen();
-            ((1.0 - u).ln() / (1.0 - total).ln()) as usize
-        } else {
-            usize::MAX
-        };
-        let run_end = pos.saturating_add(skip).min(template.len());
-        out.extend_from_slice(&template[pos..run_end]);
-        pos = run_end;
-        if pos >= template.len() {
-            break;
-        }
-        let kind = rng.r#gen::<f64>() * total;
-        if kind < args.sub_rate {
-            let code = b"ACGT".iter().position(|&b| b == template[pos]).unwrap();
-            out.push(b"ACGT"[(code + rng.gen_range(1..4)) % 4]);
-            pos += 1;
-        } else if kind < args.sub_rate + args.ins_rate {
-            out.push(b"ACGT"[rng.gen_range(0..4)]);
-        } else {
-            pos += 1; // deletion
-        }
-    }
 }
 
 fn reverse_complement_in_place(seq: &mut [u8]) {
@@ -109,10 +95,6 @@ fn reverse_complement_in_place(seq: &mut [u8]) {
 }
 
 fn validate(args: &Args) -> Result<(), String> {
-    let rates = [args.sub_rate, args.ins_rate, args.del_rate];
-    if rates.iter().any(|r| !r.is_finite() || *r < 0.0) || rates.iter().sum::<f64>() >= 1.0 {
-        return Err("error rates must be finite, nonnegative, and sum to less than 1".into());
-    }
     if !(args.family_mean >= 1.0 && args.family_mean.is_finite()) {
         return Err("--family-mean must be at least 1".into());
     }
@@ -130,7 +112,15 @@ fn validate(args: &Args) -> Result<(), String> {
 
 fn main() {
     let args = Args::parse();
-    if let Err(e) = validate(&args) {
+    let quality = QualityConfig::enabled(
+        args.error_median,
+        args.error_sigma,
+        args.local_q_sigma,
+        args.miscalibration,
+        args.latent_sigma,
+    );
+    let weights = [args.sub_weight, args.ins_weight, args.del_weight];
+    if let Err(e) = quality.validate(weights, 1.0).and_then(|_| validate(&args)) {
         eprintln!("Error: {e}");
         std::process::exit(2);
     }
@@ -164,25 +154,29 @@ fn main() {
     let setup_rss = peak_rss_mb();
 
     let mut ctx = OntDedupContext::new(args.dedup.params(), OntMinimizerParams::default());
-    let (mut read, mut qual) = (Vec::new(), Vec::new());
     let mut dedup_time = Duration::ZERO;
+    let mut generation_time = Duration::ZERO;
     let started = Instant::now();
     for (idx, &m) in read_molecule.iter().enumerate() {
+        let t = Instant::now();
         let (genome, start, len) = molecules[m as usize];
         let template = &genomes[genome as usize][start as usize..(start + len) as usize];
-        sequence(template, &args, &mut rng, &mut read);
+        let (mut read, mut qual, _) =
+            add_quality_errors(template, &quality, weights, 1.0, &mut rng);
         if rng.gen_bool(0.5) {
             reverse_complement_in_place(&mut read);
+            qual.reverse();
         }
-        qual.resize(read.len(), b'5');
+        generation_time += t.elapsed();
         let t = Instant::now();
         ctx.process_read_by_index(idx, &read, &qual);
         dedup_time += t.elapsed();
         if (idx + 1) % 1_000_000 == 0 {
             eprintln!(
-                "{} M reads, {:.1} us/read dedup, peak RSS {:.0} MB",
+                "{} M reads, {:.1} us/read dedup, {:.1} us/read generation, peak RSS {:.0} MB",
                 (idx + 1) / 1_000_000,
                 dedup_time.as_secs_f64() * 1e6 / (idx + 1) as f64,
+                generation_time.as_secs_f64() * 1e6 / (idx + 1) as f64,
                 peak_rss_mb()
             );
         }
@@ -192,13 +186,14 @@ fn main() {
     dedup_time += t.elapsed();
     let stats = ctx.detailed_stats();
     println!(
-        "reads={} molecules={} clusters={} dedup_s={:.1} us_per_read={:.1} total_s={:.1} \
+        "reads={} molecules={} clusters={} dedup_s={:.1} us_per_read={:.1} generation_s={:.1} total_s={:.1} \
          setup_rss_mb={setup_rss:.0} peak_rss_mb={:.0} postings_per_read={:.0} candidates_per_read={:.2} unavailable_quality_reads={} assumed_rate_comparisons={}",
         args.reads,
         molecules.len(),
         stats.clusters,
         dedup_time.as_secs_f64(),
         dedup_time.as_secs_f64() * 1e6 / args.reads as f64,
+        generation_time.as_secs_f64(),
         started.elapsed().as_secs_f64(),
         peak_rss_mb(),
         stats.postings_visited as f64 / args.reads as f64,

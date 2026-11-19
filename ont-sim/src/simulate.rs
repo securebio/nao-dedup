@@ -114,6 +114,12 @@ pub fn add_quality_errors(
     let sigma = config.latent_sigma.unwrap();
     let latent_log = sigma * (normal(rng) - 0.5 * sigma);
     let batch_log = config.miscalibration.unwrap().ln();
+    // Event probability before capping, by Phred score: one table per read
+    // instead of two exponentials per base.
+    let floor = (config.unreported_error_floor.ln() + latent_log).exp();
+    let unbounded_by_q: [f64; 94] = std::array::from_fn(|q| {
+        (-(q as f64) * std::f64::consts::LN_10 / 10.0 + batch_log + latent_log).exp() + floor
+    });
     let total = weights.iter().sum::<f64>();
     let weights = weights.map(|w| w / total);
     let (mut out, mut qual, mut counts) = (
@@ -136,10 +142,7 @@ pub fn add_quality_errors(
                 + config.local_q_sigma.unwrap() * normal(rng))
             .round()
             .clamp(0.0, 93.0) as u8;
-            let quality_probability =
-                (-f64::from(q) * std::f64::consts::LN_10 / 10.0 + batch_log + latent_log).exp();
-            let unbounded =
-                quality_probability + (config.unreported_error_floor.ln() + latent_log).exp();
+            let unbounded = unbounded_by_q[usize::from(q)];
             saturated_positions += usize::from(unbounded > 1.0);
             let probability = unbounded.min(1.0);
             if local_total == 0.0 || !rng.gen_bool(probability) {

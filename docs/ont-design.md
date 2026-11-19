@@ -129,9 +129,11 @@ throughput and peak memory at that scale.
 - **Metrics.** The evaluator reports pair-level precision and recall against
   molecule truth and endpoint-identifiability truth. `ont_eval` adds timing
   and work counters.
-- **Scale test.** `examples/ont_scale.rs` streams synthetic reads without
-  storing them to measure throughput and peak memory at tens of millions of
-  reads.
+- **Scale test.** `examples/ont_scale.rs` streams quality-conditioned reads
+  without storing them, reporting deduplication time, generation time and peak
+  memory. It requires `--sub-weight`, `--ins-weight`, `--del-weight`,
+  `--error-median`, `--error-sigma`, `--local-q-sigma`, `--miscalibration` and
+  `--latent-sigma`; add `--genomes 1 --genome-len 7000` for saturated seed groups.
 
 ## Limitations
 
@@ -142,9 +144,9 @@ including foldbacks, are compared without trimming (see "Read ends").
 Low-complexity endpoints can be ambiguous.
 
 Saturated groups also cost more per read: each seed matches many leaders,
-and the cost grows with the number of leaders. In the synthetic scale test
-with all reads from one 7 kb genome (`ont_scale --genomes 1 --genome-len 7000`,
-default parameters), per-read cost went from about 43 to 74 µs as reads went
-from 1M to 4M; other synthetic inputs ran at 19–33 µs per read. These figures
-illustrate bucketing and storage costs; runtime depends on the machine and
-comparison parameters.
+and the cost grows with the number of leaders. In the original constant-quality
+scale test with all reads from one 7 kb genome (`ont_scale --genomes 1
+--genome-len 7000`, default parameters), per-read cost went from about 43 to 74 µs
+as reads went from 1M to 4M; other synthetic inputs ran at 19–33 µs per read.
+These figures illustrate bucketing and storage costs; runtime depends on the
+machine and comparison parameters.
