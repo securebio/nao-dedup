@@ -3,6 +3,12 @@ name = "nao_dedup"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["ont-sim"]
+# Plain `cargo test` should cover the simulator too.
+default-members = [".", "ont-sim"]
+resolver = "3"
+
 [lib]
 name = "nao_dedup"
 crate-type = ["rlib"]
@@ -15,6 +21,11 @@ path = "src/dedup_interleaved_fastq.rs"
 name = "dedup_ont_fastq"
 path = "src/dedup_ont_fastq.rs"
 
+# Run this example's unit tests with plain `cargo test`.
+[[example]]
+name = "ont_nearmiss"
+test = true
+
 [dependencies]
 ahash = "0.8"
 rustc-hash = "2.1"
@@ -24,6 +35,7 @@ clap = { version = "4.5", features = ["derive"] }
 editdistancek = "1.0"
 
 [dev-dependencies]
+ont-sim = { path = "ont-sim" }
 tempfile = "3.8"      # Temporary files for testing
 rand = "0.8"          # Random sequence generation
 assert_cmd = "2.0"    # CLI testing
