@@ -1,7 +1,8 @@
 mod common;
 use common::random_seq;
 use common::sim::{
-    self, Endpoints, Errors, QualityConfig, SimConfig, evaluate, reverse_complement, simulate,
+    self, Endpoints, Errors, QualityConfig, SimConfig, add_quality_errors, evaluate,
+    reverse_complement, simulate,
 };
 use nao_dedup::ont::{OntDedupContext, OntDedupParams, OntMinimizerParams};
 use rand::rngs::StdRng;
@@ -302,6 +303,10 @@ fn default_params_recall_on_quality_conditioned_reads() {
     let result = evaluate_dedup(&sim, OntDedupParams::default());
     let recall = result.molecule.recall().unwrap();
     assert!(recall > 0.95, "recall {recall}");
+    // A few distinct molecules share exact endpoints, which no
+    // reference-free method can separate.
+    let precision = result.molecule.precision().unwrap();
+    assert!(precision > 0.99, "precision {precision}");
 }
 
 #[test]
@@ -331,15 +336,29 @@ fn generator_is_deterministic_from_seed() {
 
 #[test]
 fn generator_truth_describes_error_free_reads() {
+    for endpoints in [
+        Endpoints::Uniform,
+        Endpoints::Hotspot {
+            count: 5,
+            jitter: 3,
+        },
+    ] {
+        check_error_free_truth(endpoints);
+    }
+}
+
+fn check_error_free_truth(endpoints: Endpoints) {
     let reads = simulate(&SimConfig {
         n_genomes: 2,
         n_molecules: 50,
+        endpoints,
         errors: Errors::Simple { rates: [0.0; 3] },
         ..sim_config()
     });
     let mut by_molecule = std::collections::HashMap::new();
     for r in &reads {
         let t = &r.truth;
+        assert!(t.start < t.end && t.end <= 100_000);
         assert_eq!(r.sequence.len(), t.end - t.start);
         let forward = by_molecule
             .entry(t.molecule_id)
@@ -385,7 +404,6 @@ fn pair_evaluation_counts_molecule_and_endpoint_pairs() {
 
 #[test]
 fn generated_quality_predicts_substitution_counts() {
-    use common::sim::add_quality_errors;
     let source = random_seq(200_000, &mut StdRng::seed_from_u64(81));
     // Illustrative calibration checks, with no latent or between-read spread.
     for batch in [1.0, 2.0] {
@@ -467,7 +485,6 @@ fn leader_quality_summary_survives_exemplar_replacement() {
 
 #[test]
 fn quality_conditioned_duplicate_recall_and_protected_near_misses() {
-    use common::sim::add_quality_errors;
     let model = |median| quality_model(median, 0.15);
     let mut rng = StdRng::seed_from_u64(9281);
     let params = OntDedupParams::default();
@@ -536,7 +553,6 @@ fn quality_conditioned_duplicate_recall_and_protected_near_misses() {
 
 #[test]
 fn default_params_protect_related_strains_with_good_duplicate_recall() {
-    use common::sim::add_quality_errors;
     use rand::seq::index::sample;
 
     let params = OntDedupParams::default();
@@ -572,17 +588,16 @@ fn default_params_protect_related_strains_with_good_duplicate_recall() {
         }
     }
     assert!(duplicates >= 135, "{duplicates}/{trials} duplicates merged");
-    // Allow sampling margin without claiming the model's 5% tail is a
-    // pipeline-wide bound, or testing only specially calibrated parameters.
+    // The design target is under 5% per comparison; this configuration merges
+    // none, so a tighter bound catches regressions well inside the target.
     assert!(
-        false_merges <= 7,
+        false_merges <= 2,
         "{false_merges}/{trials} strain pairs merged"
     );
 }
 
 #[test]
 fn default_params_preserve_rare_strains_in_dense_mixed_clusters() {
-    use common::sim::add_quality_errors;
     use rand::seq::index::sample;
 
     struct Read {
