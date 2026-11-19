@@ -38,10 +38,10 @@ Canonical minimizers from adjacent windows at both ends retrieve candidates. A
 candidate needs seed evidence at both ends in a consistent orientation. Seeds
 are visited from the ends inward, and postings are sorted by offset, so only
 postings whose offset from the end differs by at most `max_end_offset + 3`
-plus 4% of the larger offset, rounded up (indel drift) are visited. Beyond the endpoint window
-and in repeats this filter is a heuristic and can miss a duplicate. Evidence
-picks the orientation to try first; the other allowed orientation is tried if
-needed.
+plus 4% of the larger offset, rounded up (indel drift), are visited. Beyond
+the endpoint window and in repeats this filter is a heuristic and can miss a
+duplicate. Evidence picks the orientation to try first; the other allowed
+orientation is tried if needed.
 
 Each candidate passes these stages, cheapest first:
 
