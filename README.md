@@ -147,7 +147,18 @@ these as errors.
 `ont::validate_quality` checks the byte range without panicking.
 
 ONT integration tests share a small deterministic generator in
-`tests/common/sim.rs`, with explicit illustrative error parameters.
+`tests/common/sim.rs`, with explicit illustrative error parameters. The scale
+benchmark streams generated reads and reports generation time, deduplication
+time, and peak RSS. Supply its error/quality inputs at runtime; for example:
+
+```bash
+cargo run --release --example ont_scale -- --reads 50000 \
+  --sub-weight 0.4 --ins-weight 0.3 --del-weight 0.3 \
+  --error-median 0.01 --error-sigma 0.2 --local-q-sigma 1.5 \
+  --miscalibration 1 --latent-sigma 0.1
+```
+
+Use `--genomes 1 --genome-len 7000` to benchmark saturated seed groups.
 
 ---
 
