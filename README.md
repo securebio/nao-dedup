@@ -153,8 +153,7 @@ cargo run --release --example ont_scale -- --reads 50000 \
 ```
 
 Use `--genomes 1 --genome-len 7000` to benchmark saturated seed groups.
-Generating reads takes longer than deduplicating them; the two are timed
-separately.
+Generation can dominate runtime; the two are timed separately.
 
 ---
 
