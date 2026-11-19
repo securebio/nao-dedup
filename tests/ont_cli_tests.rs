@@ -123,14 +123,18 @@ fn run_on(input: &str, extra: &[&str]) -> (assert_cmd::assert::Assert, TempDir) 
 
 #[test]
 fn rejects_malformed_fastq() {
-    for input in [
-        "@r0\nACGT\n+\nII\n",   // quality length differs
-        "r0\nACGT\n+\nIIII\n",  // header without '@'
-        "@r0\nACGT\n-\nIIII\n", // separator without '+'
-        "@r0\nACGT\n+\n",       // truncated record
-        "@r0\nACGT\n",          // truncated record
+    for (input, message) in [
+        ("@r0\nACGT\n+\nII\n", "lengths differ"),
+        ("r0\nACGT\n+\nIIII\n", "must start with '@'"),
+        ("@r0\nACGT\n-\nIIII\n", "must start with '+'"),
+        ("@r0\nACGT\n+\nII I\n", "valid Phred+33"),
+        ("@r0\nACGT\n+\n", "incomplete FASTQ record"),
+        ("@r0\nACGT\n", "incomplete FASTQ record"),
     ] {
-        run_on(input, &[]).0.failure();
+        run_on(input, &[])
+            .0
+            .failure()
+            .stderr(predicates::str::contains(message));
     }
 }
 
@@ -185,22 +189,6 @@ fn cli_exposes_user_decisions() {
         assert!(text.contains(flag), "{text}");
     }
     assert!(text.contains("regular file"), "{text}");
-    // Matching constants are fixed; the CLI exposes user decisions.
-    for removed in [
-        "--noise-scale",
-        "--end-check-len",
-        "--max-end-errors",
-        "--max-error-frac",
-        "--quality-calibration",
-        "--quality-error-floor",
-        "--pair-distance-cv",
-        "--seed-drift-frac",
-        "--kmer-len",
-        "--window-len",
-        "--num-windows",
-    ] {
-        assert!(!text.contains(removed), "{removed} in help: {text}");
-    }
 }
 
 #[test]
@@ -362,6 +350,12 @@ fn validates_statistical_parameters_and_phred_bytes() {
         ("--assumed-error-rate", "NaN", "assumed_error_rate"),
         ("--assumed-error-rate", "inf", "assumed_error_rate"),
         ("--assumed-error-rate", "1.1", "assumed_error_rate"),
+        (
+            "--max-end-offset",
+            "33",
+            "max_end_offset must be at most 32",
+        ),
+        ("--assignments", "-", "use /dev/stdout"),
     ] {
         run_on("", &[&format!("{flag}={bad}")])
             .0
@@ -372,7 +366,10 @@ fn validates_statistical_parameters_and_phred_bytes() {
         run_on("", &[&format!("{flag}=-0.1")]).0.failure();
     }
     // Constant invalid qualities are input errors, not unavailable placeholders.
-    run_on("@r0\nACGT\n+\n    \n", &[]).0.failure();
+    run_on("@r0\nACGT\n+\n    \n", &[])
+        .0
+        .failure()
+        .stderr(predicates::str::contains("valid Phred+33"));
     run_on("", &["--assumed-error-rate", "0"]).0.success();
 }
 

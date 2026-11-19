@@ -15,7 +15,12 @@ endpoints and sequence"), not guaranteed molecular counts.
 
 ## Read ends
 
-Raw read ends are compared as they are. Some ONT reads end in sequence that
+Read ends are taken to be fragment ends, so adapters, barcodes and primers
+should be trimmed first. Sequence shared by many reads at their ends (an
+untrimmed adapter, say) defeats the endpoint check: if it covers the 32-base
+endpoint window, distinct fragments whose true ends are a few bases apart can
+merge on the whole-read budget alone, and every read lands in the same seed
+buckets. Ends are otherwise compared raw. Some ONT reads end in sequence that
 isn't part of the template's forward strand, most notably foldback reads,
 which continue into the reverse complement of the molecule. If a foldback
 forms before PCR, all copies of the molecule carry it and match without
@@ -27,12 +32,12 @@ poly-A/T tails don't create giant buckets.
 ## Clustering and comparison
 
 Reads stream into greedy clusters. Each cluster's first read is its immutable
-comparison leader; a new read joins the first leader it matches, and clusters
-never merge. The exemplar is the member with the highest mean Phred quality,
-then the longest. Members match their leader, not necessarily the exemplar.
-`finalize()` resolves assignments to exemplars and frees the seed index,
-leader sequences and comparison buffers, keeping only assignments and each
-cluster's exemplar.
+comparison leader; a new read joins the first matching leader in the order
+candidates are found (below), and clusters never merge. The exemplar is the
+member with the highest mean Phred quality, then the longest. Members match
+their leader, not necessarily the exemplar. `finalize()` resolves assignments to
+exemplars and frees the seed index, leader sequences and comparison buffers,
+keeping only assignments and each cluster's exemplar.
 
 Canonical minimizers from adjacent windows at both ends retrieve candidates. A
 candidate needs seed evidence at both ends in a consistent orientation. Seeds
@@ -89,26 +94,28 @@ are written after finalization in input order. Writing exemplar FASTQ rereads
 INPUT, so it must be a regular file; streams such as stdin require
 `--assignments` without OUTPUT.
 
-Leaders are packed at 2 bits per ACGT base, with verbatim fallback for other
-bytes, plus a 4-byte expected-error summary. Assignments use one `u32` per
-read. The seed index maps hashes to offset-sorted 8-byte postings, up to 16
-per leader by default. In synthetic tests with 0.5–4.5 kb reads, peak memory
-was about 0.9 KB per leader when leaders shared seeds and 1.4 KB when every
-seed was distinct, so tens of millions of unique reads of that length fit in
-64 GB. Packed sequence costs a quarter byte per base, so longer reads cost
-proportionally more.
+Leaders are packed at 2 bits per ACGT base; a leader containing any other byte
+is stored verbatim. Each also keeps a 4-byte expected-error summary. Assignments
+use one `u32` per read. The seed index maps hashes to offset-sorted 8-byte
+postings, up to 16 per leader by default. In synthetic tests with 0.5–4.5 kb
+reads, peak memory was about 0.9 KB per leader when leaders shared seeds and
+1.4 KB when every seed was distinct, so tens of millions of unique reads of that
+length fit in 64 GB. Packed sequence costs a quarter byte per base, so longer
+reads cost proportionally more.
 
 ## Validation
 
 - Unit tests check endpoint DP against a full-DP oracle, rolling hashes against
   an oracle, and negative-binomial tail goldens.
 - Integration tests use generated reads with explicit illustrative error inputs
-  to check retrieval and endpoint precision/recall, quality-conditioned duplicate
-  recall at defaults, related-strain protection at defaults, and rare strains
-  in dense mixed clusters. The shared generator is in `tests/common/sim.rs`.
+  to check retrieval and endpoint precision/recall, quality-conditioned
+  duplicate recall at defaults, related-strain protection at defaults, and rare
+  strains in dense mixed clusters. The shared generator is in
+  `tests/common/sim.rs`.
 - CLI tests cover FASTQ, gzip, streams, assignments, and input validation.
 - `examples/ont_scale.rs` streams generated reads and reports generation and
-  deduplication time separately, plus peak RSS; error/quality inputs are required.
+  deduplication time separately, plus peak RSS; error/quality inputs are
+  required.
 
 The simulator, parameter sweeps and near-miss experiments used to tune the
 defaults live on the separate `coding-agent/ont-tuning-toolkit` branch.
@@ -118,7 +125,10 @@ defaults live on the separate `coding-agent/ont-tuning-toolkit` branch.
 Independent molecules can share endpoints by chance, especially at deep
 coverage of short genomes. Close strains can still merge; the pair budget does
 not guarantee a false-merge rate outside its noise model. Low-complexity
-endpoints can be ambiguous.
+endpoints can be ambiguous. Untrimmed shared end sequence weakens the
+endpoint check (see "Read ends"). Some duplicates are always missed: reads
+without seeds at both ends become singletons, and candidates are found only
+through seeds in the outer 256 bases of each end (8 windows of 32 by default).
 
 Runtime is single-threaded. In dense groups (many reads from one short genome)
 each read meets more candidate leaders as the group grows, so the cost per
