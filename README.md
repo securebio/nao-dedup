@@ -124,7 +124,7 @@ cargo build --release --bin dedup_ont_fastq
   merge more.
 - **`--no-rc`** restricts matching to the same orientation.
 - **Expert flags:** `--max-end-offset` sets endpoint tolerance (default 2
-  bases). `--assumed-error-rate` sets per-base noise for empty or exactly
+  bases, at most 32). `--assumed-error-rate` sets per-base noise for empty or exactly
   constant qualities (default 0.01); the quality scale and floor do not apply
   to these reads. The CLI reports affected reads and comparisons.
 
