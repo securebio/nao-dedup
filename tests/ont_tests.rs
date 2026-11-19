@@ -169,6 +169,21 @@ fn quality_outranks_length() {
 }
 
 #[test]
+fn finalize_is_idempotent() {
+    let mut rng = StdRng::seed_from_u64(7);
+    let seq = random_seq(800, &mut rng);
+    let mut ctx = OntDedupContext::new(OntDedupParams::default(), OntMinimizerParams::default());
+    ctx.process_read_by_index(0, &seq, &qual(800, 10));
+    ctx.process_read_by_index(1, &seq, &qual(800, 30));
+    ctx.finalize();
+    ctx.finalize();
+    assert_eq!(
+        (ctx.get_exemplar_index(0), ctx.get_exemplar_index(1)),
+        (1, 1)
+    );
+}
+
+#[test]
 fn unseedable_reads_are_singletons() {
     let reads = [
         (b"ACGT".to_vec(), qual(4, 20)),
