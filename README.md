@@ -143,7 +143,7 @@ The CLI targets Unix-like systems. For use from Rust, see
 
 The `ont_scale` example benchmarks the deduplicator on generated reads and
 reports generation time, deduplication time, and peak RSS (Linux). Supply its
-error/quality inputs at runtime; for example:
+error/quality inputs at runtime; for example, with illustrative values:
 
 ```bash
 cargo run --release --example ont_scale -- --reads 50000 \
@@ -152,7 +152,7 @@ cargo run --release --example ont_scale -- --reads 50000 \
   --miscalibration 1 --latent-sigma 0.1
 ```
 
-Use `--genomes 1 --genome-len 7000` to benchmark saturated seed groups.
+Use `--genomes 1 --genome-len 10000` to benchmark saturated seed groups.
 Generation can dominate runtime; the two are timed separately.
 
 ---
