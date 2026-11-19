@@ -2,6 +2,9 @@
 //!
 //! See `docs/ont-design.md` for the design. This module is independent of the
 //! Illumina path in the crate root.
+//!
+//! Read ends are taken to be fragment ends: trim adapters, barcodes and primers
+//! first. Sequence shared at the ends of many reads defeats the endpoint check.
 
 mod compare;
 mod context;
