@@ -49,7 +49,8 @@ const SEED_DRIFT_FRAC: f64 = 0.04;
 /// `protect_divergence` apart, subject to a whole-read cap.
 #[derive(Debug, Clone)]
 pub struct OntDedupParams {
-    /// Endpoint displacement (bases) allowed at each end at no cost.
+    /// Endpoint displacement (bases) allowed at each end at no cost; at most
+    /// the 32-base endpoint window.
     pub max_end_offset: usize,
     /// Strain divergence against which to protect (0 < value <= 1).
     pub protect_divergence: f64,
@@ -74,6 +75,8 @@ impl Default for OntDedupParams {
 impl OntDedupParams {
     /// Validate parameters before processing reads.
     pub fn validate(&self) -> Result<(), String> {
+        // The endpoint check aligns a fixed window; displacement beyond it
+        // can't be distinguished from a different endpoint.
         if self.max_end_offset > END_CHECK_LEN {
             return Err(format!(
                 "max_end_offset must be at most {END_CHECK_LEN}, got {}",

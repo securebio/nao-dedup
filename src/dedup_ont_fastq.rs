@@ -30,7 +30,7 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     assignments: Option<PathBuf>,
 
-    /// Endpoint displacement (bases) allowed at each end
+    /// Endpoint displacement (bases) allowed at each end (at most 32)
     #[arg(long, default_value_t = OntDedupParams::default().max_end_offset)]
     max_end_offset: usize,
 
