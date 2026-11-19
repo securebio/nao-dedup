@@ -274,6 +274,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.output.is_none() && cli.assignments.is_none() {
         return Err("provide OUTPUT or --assignments".into());
     }
+    // `-` means stdin only; write outputs to a path such as /dev/stdout.
+    if [&cli.output, &cli.assignments]
+        .iter()
+        .any(|p| p.as_deref() == Some(Path::new("-")))
+    {
+        return Err("outputs need a path; use /dev/stdout instead of -".into());
+    }
     if cli.output.is_some()
         && !std::fs::metadata(&cli.input)
             .map_err(|e| with_path(e, &cli.input))?
