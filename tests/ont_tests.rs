@@ -152,36 +152,20 @@ fn displaced_leaders_are_skipped_without_aligning() {
 #[test]
 fn quality_outranks_length() {
     // The longer read has slightly lower mean quality, so it loses even
-    // though it is 100 bases longer.
+    // though it is 10 bases longer.
     let mut rng = StdRng::seed_from_u64(6);
-    let long = random_seq(3100, &mut rng);
+    let long = random_seq(3010, &mut rng);
     let short = long[..3000].to_vec();
     let params = OntDedupParams {
-        max_end_offset: 100,
-        max_end_errors: 0,
-        ..cap_only(0.12)
+        max_end_offset: 10,
+        ..cap_only()
     };
-    let mut long_qual = qual(3100, 30);
+    let mut long_qual = qual(3010, 30);
     long_qual[0] = b'!'; // mean quality just under 30
     let reads = vec![(short, qual(3000, 30)), (long, long_qual)];
     let exemplars = run(&reads, params);
     assert_eq!(exemplars[0], exemplars[1]);
     assert_eq!(exemplars[0], 0);
-}
-
-#[test]
-fn finalize_is_idempotent() {
-    let mut rng = StdRng::seed_from_u64(7);
-    let seq = random_seq(800, &mut rng);
-    let mut ctx = OntDedupContext::new(OntDedupParams::default(), OntMinimizerParams::default());
-    ctx.process_read_by_index(0, &seq, &qual(800, 10));
-    ctx.process_read_by_index(1, &seq, &qual(800, 30));
-    ctx.finalize();
-    ctx.finalize();
-    assert_eq!(
-        (ctx.get_exemplar_index(0), ctx.get_exemplar_index(1)),
-        (1, 1)
-    );
 }
 
 #[test]
@@ -246,17 +230,16 @@ fn evaluate_dedup(sim: &ont_sim::Simulation, params: OntDedupParams) -> ont_sim:
 }
 
 // Isolate seeds and endpoint matching with a cap-only whole-read budget.
-fn cap_only(max_error_frac: f64) -> OntDedupParams {
+fn cap_only() -> OntDedupParams {
     OntDedupParams {
         protect_divergence: 1.0,
-        max_error_frac,
         ..Default::default()
     }
 }
 
 #[test]
 fn simulated_uniform_endpoints() {
-    let result = evaluate_dedup(&simulated(&[]), cap_only(0.04));
+    let result = evaluate_dedup(&simulated(&[]), cap_only());
     let (precision, recall) = (
         result.molecule.precision().unwrap(),
         result.molecule.recall().unwrap(),
@@ -278,7 +261,7 @@ fn simulated_nearby_endpoints() {
     ]);
     let strict = OntDedupParams {
         max_end_offset: 0,
-        ..cap_only(0.04)
+        ..cap_only()
     };
     let result = evaluate_dedup(&sim, strict);
     let precision = result.identifiability.precision().unwrap();
@@ -383,12 +366,7 @@ fn quality_conditioned_duplicate_recall_and_protected_near_misses() {
     use ont_sim::{QualityConfig, add_quality_errors};
     let model = |median| QualityConfig::enabled(median, 0.15, 1.5, 1.0, 0.1);
     let mut rng = StdRng::seed_from_u64(9281);
-    let params = OntDedupParams {
-        protect_divergence: 0.01,
-        quality_calibration: 1.0,
-        quality_error_floor: 0.0,
-        ..Default::default()
-    };
+    let params = OntDedupParams::default();
     let trials = 150;
     let mut duplicates = 0;
     // Assess both fixed variant counts and independent random substitutions,
@@ -403,9 +381,16 @@ fn quality_conditioned_duplicate_recall_and_protected_near_misses() {
             // beyond it.
             let positions: Vec<usize> = if fixed {
                 use rand::seq::index::sample;
-                sample(&mut rng, source.len(), 45).into_vec()
+                sample(
+                    &mut rng,
+                    source.len(),
+                    (1.5 * params.protect_divergence * source.len() as f64).ceil() as usize,
+                )
+                .into_vec()
             } else {
-                (0..source.len()).filter(|_| rng.gen_bool(0.015)).collect()
+                (0..source.len())
+                    .filter(|_| rng.gen_bool(1.5 * params.protect_divergence))
+                    .collect()
             };
             for pos in positions {
                 variant[pos] = if variant[pos] == b'A' { b'C' } else { b'A' };

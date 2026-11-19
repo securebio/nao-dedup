@@ -37,9 +37,6 @@ struct Cli {
     /// Strain divergence against which to protect
     #[arg(long, default_value_t = OntDedupParams::default().protect_divergence)]
     protect_divergence: f64,
-    /// Multiplier on the quality-derived noise estimate
-    #[arg(long, default_value_t = OntDedupParams::default().noise_scale, value_name = "POSITIVE", value_parser = parse_noise_scale)]
-    noise_scale: f64,
     /// Expected error rate for empty or exactly constant qualities
     #[arg(long, default_value_t = OntDedupParams::default().assumed_error_rate)]
     assumed_error_rate: f64,
@@ -47,13 +44,6 @@ struct Cli {
     /// Only match reads in the same orientation (for directional libraries)
     #[arg(long)]
     no_rc: bool,
-}
-
-fn parse_noise_scale(value: &str) -> Result<f64, String> {
-    match value.parse::<f64>() {
-        Ok(n) if n.is_finite() && n > 0.0 => Ok(n),
-        _ => Err("expected a finite positive number".into()),
-    }
 }
 
 /// One FASTQ record. Lines are stored without their line endings and written
@@ -273,10 +263,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let dedup_params = OntDedupParams {
         max_end_offset: cli.max_end_offset,
         protect_divergence: cli.protect_divergence,
-        noise_scale: cli.noise_scale,
         assumed_error_rate: cli.assumed_error_rate,
         rc_tolerant: !cli.no_rc,
-        ..Default::default()
     };
     dedup_params.validate()?;
     let minimizer_params = OntMinimizerParams::default();

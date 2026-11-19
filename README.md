@@ -122,10 +122,6 @@ cargo build --release --bin dedup_ont_fastq
   unmerged when the evidence is insufficient. Lower values protect closer
   strains and make merging stricter, keeping more duplicates; higher values
   merge more.
-- **`--noise-scale POSITIVE`** overrides the multiplier on the quality-derived
-  noise estimate (default 1.0). The expected noise per read is
-  `noise_scale × (scale × quality-predicted errors + per-base floor × length)`,
-  with scale and floor defaulting to 1.2 and 0.002.
 - **`--no-rc`** restricts matching to the same orientation.
 - **Expert flags:** `--max-end-offset` sets endpoint tolerance (default 2
   bases). `--assumed-error-rate` sets per-base noise for empty or exactly
@@ -140,11 +136,11 @@ cat input.fastq.gz | ./target/release/dedup_ont_fastq - --assignments assignment
 
 From Rust, use `nao_dedup::ont::OntDedupContext`: feed sequence/quality slices
 with `process_read_by_index`, then `finalize` and query `get_exemplar_index`.
-Library parameters include `quality_calibration` (default 1.2),
-`quality_error_floor` (default 0.002), `noise_scale` (default 1.0), and endpoint,
-distance and seed controls. `pair_tail_probability` overrides the per-comparison
-tail cutoff (default 0.05). `noise_scale` multiplies both usable-quality noise
-terms; assumed-rate noise is independent of it.
+The matching parameters are `max_end_offset`, `protect_divergence`,
+`assumed_error_rate` and `rc_tolerant`, with the same defaults as the CLI.
+Quality calibration (1.2), per-base quality error floor (0.002), pair-distance
+CV (0.25), tail probability (0.05), and other matching constants are fixed
+engineering defaults. `OntMinimizerParams` remains configurable.
 The library panics on invalid parameters, malformed nonempty Phred+33
 qualities, or nonempty quality/sequence length mismatches. The CLI reports
 these as errors.

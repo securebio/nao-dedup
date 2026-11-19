@@ -8,8 +8,8 @@
 //! (by quality, then length) is tracked and resolved in `finalize()`.
 
 use super::compare::{
-    OntDedupParams, end_windows, ends_match, lengths_compatible, pair_budget, quality_summary,
-    whole_read_cap,
+    OntDedupParams, compatible_offset_range, end_windows, ends_match, lengths_compatible,
+    pair_budget, quality_summary, whole_read_cap,
 };
 use super::leaders::LeaderStore;
 use super::reverse_complement_into;
@@ -49,23 +49,6 @@ const TRIED_OPPOSITE: u8 = 32;
 struct Cluster {
     best_read_idx: u32,
     best_score: Score,
-}
-
-/// Whether a seed at `a` bases from its read end in one read and `b` bases
-/// in another could belong to duplicates. Between duplicates a seed's offset
-/// differs by the endpoint displacement plus the net indels between the seed
-/// and the read end. Within `end_check_len` of the end, and assuming the
-/// shared seed is the same (homologous) k-mer in both reads, this bound is
-/// exact: the endpoint check allows at most `max_end_offset` +
-/// `max_end_errors`. In repetitive sequence a shared seed may be a different
-/// copy of the k-mer, and the filter can then skip a duplicate.
-/// Further in, indels beyond the end window are only bounded by the
-/// independent `seed_drift_frac`, so the allowance grows with distance; this part is
-/// a heuristic, not a guarantee, and a rare dense indel cluster could hide a
-/// duplicate.
-fn offsets_compatible(a: u16, b: u16, params: &OntDedupParams) -> bool {
-    let drift = (params.seed_drift_frac * f64::from(a.max(b))).ceil() as usize;
-    usize::from(a.abs_diff(b)) <= params.max_end_offset + params.max_end_errors + drift
 }
 
 /// Per-leader evidence bits for the current read: a dense array indexed by
@@ -110,7 +93,6 @@ struct LeaderScratch {
 /// Match a packed leader, unpacking its ends first and its full sequence
 /// only after the endpoint and budget checks pass. A successful match carries
 /// the exact edit distance.
-/// Keep stages in sync with compare::is_duplicate (checked by the agreement test).
 fn matches_leader(
     read: &[u8],
     errors: (f32, f32),
@@ -121,11 +103,11 @@ fn matches_leader(
     params: &OntDedupParams,
 ) -> Option<usize> {
     let len = leaders.len(id);
-    let cap = whole_read_cap(read.len(), len, params);
+    let cap = whole_read_cap(read.len(), len);
     if read.len().abs_diff(len) > cap {
         return None;
     }
-    let (start, end) = end_windows(len, params);
+    let (start, end) = end_windows(len);
     leaders.unpack_into(id, start, &mut scratch.start);
     leaders.unpack_into(id, end, &mut scratch.end);
     if !ends_match(read, &scratch.start, &scratch.end, params) {
@@ -140,26 +122,6 @@ fn matches_leader(
     }
     leaders.unpack_into(id, 0..len, &mut scratch.full);
     editdistancek::edit_distance_bounded(read, &scratch.full, budget)
-}
-
-/// The offsets `b` compatible with `a` under `offsets_compatible`, which
-/// form one contiguous range: below `a` the allowance is fixed, and above
-/// `a` it grows by at most one per base when `seed_drift_frac` < 1.
-fn compatible_offset_range(a: u16, params: &OntDedupParams) -> (u16, u16) {
-    let base = params.max_end_offset + params.max_end_errors;
-    let drift_at_a = (params.seed_drift_frac * f64::from(a)).ceil() as usize;
-    let lo = usize::from(a).saturating_sub(base + drift_at_a) as u16;
-    let mut hi = if params.seed_drift_frac < 1.0 {
-        // Just above the largest b with b - a <= base + frac * b + 1.
-        let estimate = (f64::from(a) + base as f64 + 1.0) / (1.0 - params.seed_drift_frac);
-        estimate.min(f64::from(u16::MAX)) as u16
-    } else {
-        u16::MAX
-    };
-    while hi > a && !offsets_compatible(a, hi, params) {
-        hi -= 1;
-    }
-    (lo, hi)
 }
 
 /// The postings in an offset-sorted bucket whose offsets are compatible with
@@ -530,11 +492,11 @@ impl OntDedupContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ont::compare::offsets_compatible;
     use crate::ont::test_util::{random_seq, substitute};
 
     #[test]
-    fn packed_leader_and_test_comparator_agree_on_staged_checks() {
-        use crate::ont::compare::is_duplicate;
+    fn packed_leader_staged_checks() {
         use rand::{SeedableRng, rngs::StdRng};
 
         let mut rng = StdRng::seed_from_u64(145);
@@ -552,6 +514,7 @@ mod tests {
             }
             let reads = [
                 (leader.clone(), true),
+                (Vec::new(), false),
                 (leader[2..].to_vec(), true),
                 (inserted, true),
                 (leader[3..].to_vec(), false), // endpoint displacement
@@ -595,7 +558,6 @@ mod tests {
                             "verbatim={verbatim} swapped={swapped} len={}",
                             a.len()
                         );
-                        assert_eq!(production, is_duplicate(a, b, &params));
                     }
                 }
             }
@@ -604,7 +566,6 @@ mod tests {
         let seq = random_seq(50, &mut rng);
         let mut leaders = LeaderStore::default();
         let id = leaders.push(&seq);
-        assert!(!is_duplicate(&seq, &seq, &params));
         assert!(
             matches_leader(
                 &seq,
@@ -655,39 +616,30 @@ mod tests {
 
     #[test]
     fn offset_allowance_grows_with_distance_from_the_end() {
-        let params = OntDedupParams {
-            max_end_offset: 2,
-            max_end_errors: 5,
-            seed_drift_frac: 0.04,
-            ..Default::default()
-        };
-        // Near the end: endpoint allowance only (2 + 5 + ceil(0.04 * 10)).
-        assert!(offsets_compatible(10, 2, &params));
-        assert!(!offsets_compatible(10, 1, &params));
+        let params = OntDedupParams::default();
+        // Near the end: 2 + 3 + ceil(0.04 * 10) = 6 bases.
+        assert!(offsets_compatible(10, 4, &params));
+        assert!(!offsets_compatible(10, 3, &params));
         // 250 bases in: plus ceil(0.04 * 250) = 10 bases of indel drift.
-        assert!(offsets_compatible(250, 233, &params));
-        assert!(!offsets_compatible(250, 232, &params));
-        // Symmetric.
-        assert!(offsets_compatible(233, 250, &params));
+        assert!(offsets_compatible(250, 235, &params));
+        assert!(!offsets_compatible(250, 234, &params));
+        assert!(offsets_compatible(235, 250, &params));
     }
 
     #[test]
     fn offset_range_is_exactly_the_compatible_offsets() {
-        for (frac, base_errors) in [(0.0, 0), (0.04, 5), (0.2, 10), (1.0, 3)] {
+        for max_end_offset in [0, 2, 10] {
             let params = OntDedupParams {
-                max_end_offset: 2,
-                max_end_errors: base_errors,
-                seed_drift_frac: frac,
+                max_end_offset,
                 ..Default::default()
             };
-            for a in (0..2000).step_by(7) {
+            for a in (0..2000).step_by(7).chain([u16::MAX - 10, u16::MAX]) {
                 let (lo, hi) = compatible_offset_range(a, &params);
-                for b in 0..2600 {
-                    let in_range = (lo..=hi).contains(&b);
+                for b in (0..2600).chain(u16::MAX - 20..=u16::MAX) {
                     assert_eq!(
-                        in_range,
+                        (lo..=hi).contains(&b),
                         offsets_compatible(a, b, &params),
-                        "a={a} b={b} frac={frac}"
+                        "a={a} b={b}"
                     );
                 }
             }

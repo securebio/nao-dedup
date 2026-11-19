@@ -10,8 +10,6 @@
 
 #[path = "common/dedup.rs"]
 mod dedup;
-#[path = "common/quality_noise.rs"]
-mod quality_noise;
 
 use clap::{Parser, ValueEnum};
 use nao_dedup::ont::{OntDedupContext, OntMinimizerParams};
@@ -52,8 +50,6 @@ struct Args {
     seed: u64,
     #[command(flatten)]
     dedup: dedup::DedupArgs,
-    #[command(flatten)]
-    noise: quality_noise::QualityNoiseArgs,
     #[arg(long, default_value_t = OntMinimizerParams::default().kmer_len)]
     kmer_len: usize,
     #[arg(long, default_value_t = OntMinimizerParams::default().window_len)]
@@ -176,7 +172,7 @@ fn validate(args: &Args) -> Result<(), String> {
     {
         return Err("lengths and offsets are too large for the coordinate map".into());
     }
-    args.noise.params(args.dedup.params()).validate()?;
+    args.dedup.params().validate()?;
     OntMinimizerParams::new(args.kmer_len, args.window_len, args.num_windows)?;
     Ok(())
 }
@@ -191,7 +187,7 @@ fn trial(args: &Args, mode: Mode, divergence: f64, offset: usize, rng: &mut StdR
     let (start, end) = molecule_interval(len, flank, offset, mode, rng);
     let templates = [&source[flank..flank + len], &variant[map[start]..map[end]]];
     let mut ctx = OntDedupContext::new(
-        args.noise.params(args.dedup.params()),
+        args.dedup.params(),
         OntMinimizerParams::new(args.kmer_len, args.window_len, args.num_windows).unwrap(),
     );
     // Under --no-rc both reads share one strand, so the duplicate control
@@ -353,7 +349,7 @@ mod tests {
             "--sub-rate",
             "--ins-rate",
             "--del-rate",
-            "--max-error-frac",
+            "--protect-divergence",
             "--homopolymer-indel-mult",
             "--variant-indel-frac",
             "--divergences",
@@ -367,7 +363,7 @@ mod tests {
             ("--del-rate", "inf"),
             ("--variant-indel-frac", "1.1"),
             ("--homopolymer-indel-mult", "-1"),
-            ("--max-error-frac", "1.1"),
+            ("--protect-divergence", "1.1"),
             ("--divergences", "1"),
             ("--len-min", "0"),
             ("--len-min", "6000"),
@@ -417,8 +413,6 @@ mod tests {
     fn strict_dedup_distinguishes_sequence_and_endpoint_near_misses() {
         let mut a = args();
         a.dedup.max_end_offset = 0;
-        a.dedup.max_end_errors = 0;
-        a.dedup.max_error_frac = 0.0;
         let mut rng = StdRng::seed_from_u64(a.seed);
         for _ in 0..20 {
             assert!(trial(&a, Mode::One, 0.0, 0, &mut rng));

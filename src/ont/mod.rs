@@ -38,7 +38,6 @@ pub(crate) fn reverse_complement_into(seq: &[u8], out: &mut Vec<u8>) {
 
 #[cfg(test)]
 pub(crate) mod test_util {
-    use super::OntDedupParams;
     use rand::{Rng, rngs::StdRng};
 
     pub fn random_seq(len: usize, rng: &mut StdRng) -> Vec<u8> {
@@ -47,14 +46,5 @@ pub(crate) mod test_util {
 
     pub fn substitute(seq: &mut [u8], pos: usize) {
         seq[pos] = if seq[pos] == b'A' { b'C' } else { b'A' };
-    }
-
-    /// Isolate retrieval and endpoint rules with a cap-only whole-read budget.
-    pub fn cap_only(max_error_frac: f64) -> OntDedupParams {
-        OntDedupParams {
-            protect_divergence: 1.0,
-            max_error_frac,
-            ..Default::default()
-        }
     }
 }

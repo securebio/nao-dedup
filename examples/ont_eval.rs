@@ -7,8 +7,6 @@
 
 #[path = "common/dedup.rs"]
 mod dedup;
-#[path = "common/quality_noise.rs"]
-mod quality_noise;
 
 use clap::Parser;
 use nao_dedup::ont::{OntDedupContext, OntMinimizerParams};
@@ -21,8 +19,6 @@ struct Args {
     sim: SimConfig,
     #[command(flatten)]
     dedup: dedup::DedupArgs,
-    #[command(flatten)]
-    noise: quality_noise::QualityNoiseArgs,
 
     #[arg(long, default_value_t = OntMinimizerParams::default().kmer_len)]
     kmer_len: usize,
@@ -37,7 +33,7 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let dedup_params = args.noise.params(args.dedup.params());
+    let dedup_params = args.dedup.params();
     dedup_params.validate()?;
     let minimizer_params =
         OntMinimizerParams::new(args.kmer_len, args.window_len, args.num_windows)?;

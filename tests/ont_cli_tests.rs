@@ -178,7 +178,6 @@ fn cli_exposes_user_decisions() {
     for flag in [
         "--assignments",
         "--protect-divergence",
-        "--noise-scale",
         "--no-rc",
         "--max-end-offset",
         "--assumed-error-rate",
@@ -186,13 +185,9 @@ fn cli_exposes_user_decisions() {
         assert!(text.contains(flag), "{text}");
     }
     assert!(text.contains("regular file"), "{text}");
-    assert!(text.contains("--noise-scale <POSITIVE>"), "{text}");
-    assert!(
-        text.contains("Multiplier on the quality-derived noise estimate [default: 1]"),
-        "{text}"
-    );
-    // Tuning constants stay library-only; the CLI exposes user decisions.
+    // Matching constants are fixed; the CLI exposes user decisions.
     for removed in [
+        "--noise-scale",
         "--end-check-len",
         "--max-end-errors",
         "--max-error-frac",
@@ -367,43 +362,18 @@ fn validates_statistical_parameters_and_phred_bytes() {
         ("--assumed-error-rate", "NaN", "assumed_error_rate"),
         ("--assumed-error-rate", "inf", "assumed_error_rate"),
         ("--assumed-error-rate", "1.1", "assumed_error_rate"),
-        ("--noise-scale", "auto", "expected a finite positive number"),
-        ("--noise-scale", "0", "expected a finite positive number"),
-        ("--noise-scale", "NaN", "expected a finite positive number"),
-        ("--noise-scale", "inf", "expected a finite positive number"),
-        ("--noise-scale", "oops", "expected a finite positive number"),
     ] {
         run_on("", &[&format!("{flag}={bad}")])
             .0
             .failure()
             .stderr(predicates::str::contains(message));
     }
-    for flag in [
-        "--protect-divergence",
-        "--noise-scale",
-        "--assumed-error-rate",
-    ] {
+    for flag in ["--protect-divergence", "--assumed-error-rate"] {
         run_on("", &[&format!("{flag}=-0.1")]).0.failure();
     }
-    // Absurd multipliers would overflow the noise estimate and silently stop
-    // all merging, so they are rejected.
-    run_on("", &["--noise-scale", "1000"]).0.failure();
     // Constant invalid qualities are input errors, not unavailable placeholders.
     run_on("@r0\nACGT\n+\n    \n", &[]).0.failure();
     run_on("", &["--assumed-error-rate", "0"]).0.success();
-}
-
-#[test]
-fn accepts_numeric_noise_scale() {
-    let input = "@r0\nACGT\n+\nIJIJ\n";
-    for value in ["0.25", "1", "2.5", "6"] {
-        let (assert, dir) = run_on(input, &["--noise-scale", value]);
-        assert.success();
-        assert_eq!(
-            fs::read_to_string(dir.path().join("out.fastq")).unwrap(),
-            input
-        );
-    }
 }
 
 #[test]
@@ -429,30 +399,25 @@ fn assignments_only_streams_files_and_plain_or_gzip_stdin() {
         let path = dir.path().join("in.fastq");
         fs::write(&path, &input).unwrap();
         let compressed = gzip(input.as_bytes());
-        for fixed in [false, true] {
-            for (source, payload) in [
-                (path.as_path(), None),
-                (Path::new("-"), Some(input.as_bytes())),
-                (Path::new("/dev/stdin"), Some(input.as_bytes())),
-                (Path::new("-"), Some(compressed.as_slice())),
-                (Path::new("/dev/stdin"), Some(compressed.as_slice())),
-            ] {
-                let assignments = dir.path().join("assign.tsv");
-                let mut cmd = Command::cargo_bin("dedup_ont_fastq").unwrap();
-                cmd.arg(source).arg("--assignments").arg(&assignments);
-                if fixed {
-                    cmd.args(["--noise-scale", "1"]);
-                }
-                if let Some(payload) = payload {
-                    cmd.write_stdin(payload);
-                }
-                cmd.assert().success();
-                assert_eq!(
-                    fs::read_to_string(&assignments).unwrap(),
-                    expected,
-                    "{count}, {fixed}, {source:?}"
-                );
+        for (source, payload) in [
+            (path.as_path(), None),
+            (Path::new("-"), Some(input.as_bytes())),
+            (Path::new("/dev/stdin"), Some(input.as_bytes())),
+            (Path::new("-"), Some(compressed.as_slice())),
+            (Path::new("/dev/stdin"), Some(compressed.as_slice())),
+        ] {
+            let assignments = dir.path().join("assign.tsv");
+            let mut cmd = Command::cargo_bin("dedup_ont_fastq").unwrap();
+            cmd.arg(source).arg("--assignments").arg(&assignments);
+            if let Some(payload) = payload {
+                cmd.write_stdin(payload);
             }
+            cmd.assert().success();
+            assert_eq!(
+                fs::read_to_string(&assignments).unwrap(),
+                expected,
+                "{count}, {source:?}"
+            );
         }
     }
 }

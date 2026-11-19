@@ -45,10 +45,10 @@ This drift filter is a heuristic in repeats and beyond the end-check window.
 Each candidate passes these stages:
 
 1. The length difference must fit `max_error_frac` of the longer read
-   (default 0.12), before unpacking the leader's ends.
+   (fixed 0.12), before unpacking the leader's ends.
 2. At each end, align `end_check_len` bases inward from the boundary
-   (default 32). Up to `max_end_offset` bases of displacement are free;
-   at most `max_end_errors` edits (default 3) are allowed. The inner boundary
+   (fixed 32). Up to `max_end_offset` bases of displacement are free;
+   at most `max_end_errors` edits (fixed 3) are allowed. The inner boundary
    is free. Reject if allowing a larger displacement makes the alignment
    strictly cheaper, so the error allowance does not widen endpoint tolerance.
 3. Calculate a quality-dependent pair budget `T`, capped at `max_error_frac`.
@@ -59,26 +59,23 @@ Each candidate passes these stages:
 ## Pair budget
 
 The expected noise per read is
-`noise_scale × (quality_calibration × quality-predicted errors + quality_error_floor × length)`.
-Quality-predicted errors sum `10^(-Q/10)` over bases; library parameters
-`quality_calibration` and `quality_error_floor` default to 1.2 and 0.002;
-`noise_scale` defaults to 1.0 and can be overridden. Empty or exactly constant
+`quality_calibration × quality-predicted errors + quality_error_floor × length`.
+Quality-predicted errors sum `10^(-Q/10)` over bases. Empty or exactly constant
 qualities instead contribute `assumed_error_rate × length` (default rate 0.01),
-without quality terms or `noise_scale`. Malformed nonempty qualities are errors.
+without quality terms. Malformed nonempty qualities are errors.
 
 `quality_calibration = 1.2`, `quality_error_floor = 0.002`,
 `pair_distance_cv = 0.25` and the 5% tail cutoff
-(`pair_tail_probability = 0.05`) are tuned engineering defaults. Library
-callers can override all four; the CLI also exposes `noise_scale` for adjusting
-the quality-derived noise contribution. `noise_scale` stays fixed during a run;
-there is no automatic calibration.
+(`pair_tail_probability = 0.05`) are fixed engineering defaults, as are the
+endpoint window, endpoint error allowance, whole-read cap and seed drift
+(`seed_drift_frac = 0.04`).
 
 Pair noise sums the two reads' contributions. A pair from strains
 `protect_divergence` apart has mean distance
 `mu = noise + protect_divergence × shorter_length`. `T` is the largest integer
 distance with lower-tail probability below `pair_tail_probability` under a
 negative binomial with that mean and variance
-`mu + (pair_distance_cv × noise)^2` (CV default 0.25).
+`mu + (pair_distance_cv × noise)^2` (fixed CV 0.25).
 A negative budget rejects even identical reads. Longer reads give more evidence
 about strain differences; short or noisy reads can remain unmerged.
 
@@ -89,9 +86,9 @@ clustering and model mismatch can change the aggregate false-merge rate.
 ## CLI and storage
 
 The CLI exposes INPUT, optional OUTPUT, `--assignments`, `--protect-divergence`,
-`--noise-scale` and `--no-rc`, plus expert `--max-end-offset` and
-`--assumed-error-rate`. Other matching and seed controls remain library and
-example parameters.
+and `--no-rc`, plus expert `--max-end-offset` and
+`--assumed-error-rate`. Matching constants are fixed; seed controls remain
+library and example parameters.
 
 Input can be plain or gzip FASTQ, detected from the first two bytes even when
 reads from a stream are short. Assignments are written after finalization in
