@@ -45,40 +45,44 @@ every replacement is a member within tolerance of the previous target, so
 endpoints and sequence could creep further from the first read with each step,
 widening the effective endpoint tolerance. A fixed leader keeps every member
 within one comparison of the same read, and its seeds are indexed once. A noisy
-leader costs recall, not precision: the pair budget already widens with the
-leader's predicted noise.
+leader mainly costs recall: the pair budget accounts for the leader's predicted
+noise, so the protected-divergence test still applies under the noise model.
 
 ### Finding candidates
 
 Each read yields seeds from both ends: the canonical minimizer (15-mer) of each
-of 8 adjacent 32-base windows laid out inward from the start and inward from
-the end, each with its offset from that end. Canonical k-mers make a read and
-its reverse complement produce the same seeds with the ends swapped.
+of up to 8 adjacent 32-base windows (by default) laid out inward from the start
+and inward from the end. Short reads have fewer windows, and a window without a
+valid non-homopolymer ACGT k-mer gives no seed. Each seed keeps its offset from
+its end: k-mer start minus read start, or read end minus k-mer end. Canonical
+k-mers make a read and its reverse complement produce the same seeds with the
+ends swapped.
 
 Leaders' seeds go into one index, a hash map from seed to a bucket of
 *postings*. A posting records one occurrence of the seed in a leader: the
 leader, which of its ends the seed came from, and the seed's offset from that
 end. Each bucket is sorted by offset.
 
-The Illumina path can key buckets on minimizers at fixed positions. Here
-endpoints may shift by a few bases and indels move seeds, so a shared seed is
-only evidence, and offsets decide which postings count. For a new read, seeds
-are looked up window by window, from the ends inward. For each seed only the
-postings whose offset is close to the read's are visited: within
-`max_end_offset + 3` plus 4% of the larger offset, rounded up (indel drift).
-Each visited posting records which read end matched which leader end. A leader
-becomes a candidate once it has evidence at both ends in a consistent
-orientation: read start with leader start and read end with leader end (same
-strand), or the crossed pairing (opposite strand).
+The Illumina path buckets reads by minimizers from fixed adjacent windows at
+each mate's start. Here endpoints may shift by a few bases and indels move
+seeds, so a shared seed is only evidence, and offsets decide which postings
+count. For a new read, seeds are looked up window by window, from the ends
+inward. For each seed only the postings whose offset is close to the read's are
+visited: within `max_end_offset + 3` plus 4% of the larger offset, rounded up
+(indel drift). Each visited posting records which read end matched which leader
+end. A leader becomes a candidate once it has evidence at both ends in a
+consistent orientation: read start with leader start and read end with leader
+end (same strand), or the crossed pairing (opposite strand).
 
-Candidates are not ranked. They are aligned in the order they qualify, that is
-by window from the ends inward and, within a window, in bucket order (by offset,
-then leader creation order), and the first match ends the search. Seeds near the
-ends are the most position-specific, so true duplicates usually qualify after a
-few lookups, without scanning the large buckets of inner seeds. Evidence picks
-the orientation to try first; the other allowed orientation is tried if needed.
-Beyond the endpoint window and in repeats the offset filter is a heuristic and
-can miss a duplicate.
+Candidates are not ranked. Seeds are processed window by window from the ends
+inward; in each window the start seed's postings are visited before the end
+seed's, each bucket in offset order, then leader creation order. Leaders queue
+as their evidence completes, the queue is aligned after both lookups, and the
+first match ends the search. Seeds near the ends are the most position-specific,
+so true duplicates usually qualify after a few lookups, without scanning the
+large buckets of inner seeds. Evidence picks the orientation to try first; the
+other allowed orientation is tried if needed. Beyond the endpoint window and in
+repeats the offset filter is a heuristic and can miss a duplicate.
 
 ### Comparing a candidate
 
