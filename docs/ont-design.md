@@ -39,18 +39,60 @@ their leader, not necessarily the exemplar. `finalize()` resolves assignments to
 exemplars and frees the seed index, leader sequences and comparison buffers,
 keeping only assignments and each cluster's exemplar.
 
-Canonical minimizers from adjacent windows at both ends retrieve candidates. A
-candidate needs seed evidence at both ends in a consistent orientation. Seeds
-are visited from the ends inward, and postings are sorted by offset, so only
-postings whose offset from the end differs by at most `max_end_offset + 3`
-plus 4% of the larger offset, rounded up (indel drift), are visited. Beyond
-the endpoint window and in repeats this filter is a heuristic and can miss a
-duplicate. Evidence picks the orientation to try first; the other allowed
-orientation is tried if needed.
+New reads are compared with the fixed leader rather than the current exemplar.
+If the comparison target moved to each better member, a cluster could drift:
+every replacement is a member within tolerance of the previous target, so
+endpoints and sequence could creep further from the first read with each step,
+widening the effective endpoint tolerance. A fixed leader keeps every member
+within one comparison of the same read, and its seeds are indexed once. A noisy
+leader mainly costs recall: the pair budget accounts for the leader's predicted
+noise, so the protected-divergence test still applies under the noise model.
+
+### Finding candidates
+
+Each read yields seeds from both ends: the canonical minimizer (15-mer) of each
+of up to 8 adjacent 32-base windows (by default) laid out inward from the start
+and inward from the end. Short reads have fewer windows, and a window without a
+valid non-homopolymer ACGT k-mer gives no seed. Each seed keeps its offset from
+its end: k-mer start minus read start, or read end minus k-mer end. Canonical
+k-mers make a read and its reverse complement produce the same seeds with the
+ends swapped.
+
+Leaders' seeds go into one index, a hash map from seed to a bucket of
+*postings*. A posting records one occurrence of the seed in a leader: the
+leader, which of its ends the seed came from, and the seed's offset from that
+end. Each bucket is sorted by offset.
+
+The Illumina path buckets reads by minimizers from fixed adjacent windows at
+each mate's start. Here endpoints may shift by a few bases and indels move
+seeds, so a shared seed is only evidence, and offsets decide which postings
+count. For a new read, seeds are looked up window by window, from the ends
+inward. For each seed only the postings whose offset is close to the read's are
+visited: within `max_end_offset + 3` plus 4% of the larger offset, rounded up
+(indel drift). Each visited posting records which read end matched which leader
+end. A leader becomes a candidate once it has evidence at both ends in a
+consistent orientation: read start with leader start and read end with leader
+end (same strand), or the crossed pairing (opposite strand).
+
+Candidates are not ranked. Seeds are processed window by window from the ends
+inward; in each window the start seed's postings are visited before the end
+seed's, each bucket in offset order, then leader creation order. Leaders queue
+as their evidence completes, the queue is aligned after both lookups, and the
+first match ends the search. Seeds near the ends are the most position-specific,
+so true duplicates usually qualify after a few lookups, without scanning the
+large buckets of inner seeds. Evidence picks the orientation to try first; the
+other allowed orientation is tried if needed. Beyond the endpoint window and in
+repeats the offset filter is a heuristic and can miss a duplicate.
+
+### Comparing a candidate
 
 Each candidate passes these stages, cheapest first:
 
 1. The length difference must fit the whole-read cap, 12% of the longer read.
+   Sequencing indels change length, so duplicates' lengths can differ by more
+   than the `2 × max_end_offset` that endpoint displacement allows. Every
+   base of length difference costs an edit, though, so the edit budget bounds
+   it.
 2. At each end, align up to 32 bases inward from the boundary, with the outer
    boundary anchored and the inner one free. Up to `max_end_offset` bases of
    displacement are free and at most 3 edits are allowed. Reject if allowing
@@ -83,7 +125,12 @@ The 5% is per comparison under this model, not a bound on cluster
 contamination: a read can meet several leaders, and model mismatch changes the
 real rate. The quality coefficients, dispersion, tail probability, endpoint
 window and its error allowance, whole-read cap and seed drift are fixed
-engineering defaults.
+engineering defaults. They are documented constants at the top of
+`src/ont/compare.rs`. The tests in `tests/ont_tests.rs` named
+`default_params_*` pin the behavior they produce. The simulator, parameter
+sweeps (`examples/ont_eval.rs`) and near-miss merge-probability grid
+(`examples/ont_nearmiss.rs`) used to choose them are on the
+`coding-agent/ont-tuning-toolkit` branch.
 
 ## CLI and storage
 
