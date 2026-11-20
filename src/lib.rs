@@ -2,6 +2,8 @@ use ahash::AHashSet;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 
+pub mod ont;
+
 // ============================================================================
 // Configuration Parameters
 // ============================================================================
