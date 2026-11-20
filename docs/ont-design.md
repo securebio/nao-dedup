@@ -160,12 +160,10 @@ reads cost proportionally more.
   strains in dense mixed clusters. The shared generator is in
   `tests/common/sim.rs`.
 - CLI tests cover FASTQ, gzip, streams, assignments, and input validation.
-- `examples/ont_scale.rs` streams generated reads and reports generation and
-  deduplication time separately, plus peak RSS; error/quality inputs are
-  required.
 
 The simulator, parameter sweeps and near-miss experiments used to tune the
-defaults live on the separate `coding-agent/ont-tuning-toolkit` branch.
+defaults live on the separate `coding-agent/ont-tuning-toolkit` branch, along
+with the `ont_scale` throughput and memory benchmark.
 
 ## Limitations
 

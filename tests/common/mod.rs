@@ -1,4 +1,4 @@
-// Each integration test and example uses a different subset of these helpers.
+// Each integration test uses a different subset of these helpers.
 #[allow(dead_code)]
 pub mod sim;
 
