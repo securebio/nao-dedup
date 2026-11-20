@@ -4,11 +4,14 @@ Sequencing read deduplication with error-tolerant matching.
 
 This repository provides two things:
 
-1. **Command-line tool**: Deduplicates interleaved FASTQ.gz files directly
+1. **Command-line tools**: `dedup_interleaved_fastq` deduplicates Illumina
+   interleaved FASTQ.gz files, and `dedup_ont_fastq` deduplicates single-end
+   Oxford Nanopore reads (see [ONT (Nanopore) Deduplication](#ont-nanopore-deduplication))
 2. **Rust library**: For integrating deduplication into other Rust programs
 
 Both use minimizer-based bucketing for efficiency and tolerate small alignment
-shifts and sequencing errors.
+shifts and sequencing errors. The sections below describe the Illumina path
+unless they say otherwise.
 
 ## Features
 
@@ -94,6 +97,52 @@ Single-threaded; we parallelize by running multiple files concurrently.
 
 ---
 
+## ONT (Nanopore) Deduplication
+
+`dedup_ont_fastq` deduplicates single-end ONT reads. Copies of a fragment must
+share both endpoints and match within an indel-aware edit budget. Opposite
+strands match by default. Read ends should be fragment ends, so trim adapters,
+barcodes and primers first. See [docs/ont-design.md](docs/ont-design.md).
+
+```bash
+cargo build --release --bin dedup_ont_fastq
+./target/release/dedup_ont_fastq input.fastq.gz output.fastq.gz \
+  --assignments assignments.tsv
+```
+
+- **INPUT** accepts plain or gzip FASTQ, detected by content. Reads stream
+  directly into clustering.
+- **OUTPUT** contains one exemplar per group, preserving record text except
+  for normalizing line endings to `\n`. A `.gz` suffix enables gzip compression;
+  plain output can go to `/dev/stdout` for a parallel compressor.
+  Writing FASTQ requires a second pass, so INPUT must be a regular file.
+  Streams (including `-` for stdin and named pipes) require `--assignments`
+  without OUTPUT; invalid combinations are rejected before input is read.
+- **`--assignments PATH`** writes `read_idx`/`exemplar_idx` for every read
+  using 0-based input positions. OUTPUT is optional with this flag.
+- **`--protect-divergence`** sets the strain divergence against which to
+  protect (default 0.015, or 1.5%). Each pair gets a cutoff based on expected
+  sequencing noise and this divergence. Short or noisy reads can remain
+  unmerged when the evidence is insufficient. Lower values protect closer
+  strains and make merging stricter, keeping more duplicates; higher values
+  merge more.
+- **`--no-rc`** restricts matching to the same orientation.
+- **Expert flags:** `--max-end-offset` sets endpoint tolerance (default 2
+  bases, at most 32). `--assumed-error-rate` sets per-base noise for empty or exactly
+  constant qualities (default 0.01); the quality scale and floor do not apply
+  to these reads. The CLI reports affected reads and comparisons.
+
+For a single pass from plain or gzip stdin, write assignments only:
+
+```bash
+cat input.fastq.gz | ./target/release/dedup_ont_fastq - --assignments assignments.tsv
+```
+
+The CLI targets Unix-like systems. For use from Rust, see
+[ONT library](#ont-library).
+
+---
+
 ## Rust Library
 
 For integrating deduplication into your own Rust programs.
@@ -160,6 +209,22 @@ let (total_processed, unique_clusters) = ctx.stats();
 
 See `src/dedup_interleaved_fastq.rs` for a complete example of how to integrate
 this library with file I/O.
+
+### ONT library
+
+From Rust, use `nao_dedup::ont::OntDedupContext`: feed sequence/quality slices
+with `process_read_by_index`, then `finalize` and query `get_exemplar_index`.
+The matching parameters are `max_end_offset`, `protect_divergence`,
+`assumed_error_rate` and `rc_tolerant`, with the same defaults as the CLI.
+Quality calibration (1.2), per-base quality error floor (0.002), pair-distance
+CV (0.25), tail probability (0.05), and other matching constants are fixed
+engineering defaults. `OntMinimizerParams` remains configurable.
+The library panics on invalid parameters, malformed nonempty Phred+33
+qualities, or nonempty quality/sequence length mismatches. The CLI reports
+these as errors.
+`ont::validate_quality` checks the byte range without panicking.
+
+See `src/dedup_ont_fastq.rs` for an example with file I/O.
 
 ---
 
@@ -294,10 +359,14 @@ The test suite includes:
   offsets, and errors
 - **CLI tests**: Located in `tests/cli_tests.rs`, testing the command-line
   binary with gzipped FASTQ files
+- **ONT tests**: `tests/ont_tests.rs` and `tests/ont_cli_tests.rs`, plus inline
+  tests in `src/ont/`. Dataset tests use a small deterministic read generator
+  in `tests/common/sim.rs` with explicit illustrative error parameters
 
 To run specific test suites:
 ```bash
 cargo test --lib           # Unit tests only
 cargo test --test dedup_tests  # Integration tests
 cargo test --test cli_tests    # CLI tests
+cargo test --test ont_tests --test ont_cli_tests  # ONT library and CLI
 ```
