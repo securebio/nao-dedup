@@ -1,8 +1,7 @@
-//! Small deterministic generator for integration tests and the scale example.
+//! Small deterministic generator for integration tests.
 //! All error parameters are explicit illustrative inputs, not instrument profiles.
-//! Dataset generation stores reads; the benchmark calls `add_quality_errors`
-//! one read at a time instead. All randomness comes from the caller's `StdRng`
-//! (or `SimConfig::seed`); hash iteration never influences generated reads.
+//! All randomness comes from the caller's `StdRng` (or `SimConfig::seed`);
+//! hash iteration never influences generated reads.
 
 use rand::{Rng, SeedableRng, distributions::Open01, rngs::StdRng, seq::SliceRandom};
 use std::{collections::HashMap, hash::Hash};
