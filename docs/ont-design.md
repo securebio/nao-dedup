@@ -20,14 +20,25 @@ should be trimmed first. Sequence shared by many reads at their ends (an
 untrimmed adapter, say) defeats the endpoint check: if it covers the 32-base
 endpoint window, distinct fragments whose true ends are a few bases apart can
 merge on the whole-read budget alone, and every read lands in the same seed
-buckets. Ends are otherwise compared raw. Some ONT reads end in sequence that
-isn't part of the template's forward strand, most notably foldback reads,
-which continue into the reverse complement of the molecule. If a foldback
-forms before PCR, all copies of the molecule carry it and match without
-trimming; trimming each read independently would only add jitter at the cut.
-Libraries where foldbacks arise independently in each read would need a
-trimming step. Single-base homopolymer k-mers are never used as seeds, so
-poly-A/T tails don't create giant buckets.
+buckets. Ends are otherwise compared raw.
+
+Some reads continue into the reverse complement of their own sequence. This
+can arise in two ways, and reads are not trimmed for either:
+
+- **At the pore (foldback reads).** The complementary strand follows the first
+  strand through the pore. This happens independently in each read, so a
+  foldback read has a different end and length from other copies of its
+  molecule and stays unmerged: a missed duplicate, not a false merge.
+- **During library preparation.** A hairpin or inverted chimera formed before
+  amplification is part of the molecule, so every PCR copy carries it and the
+  copies match as they are. Trimming each read independently would only add
+  jitter at the cut.
+
+Libraries with many pore foldbacks would need a trimming step to recover those
+duplicates.
+
+Single-base homopolymer k-mers are never used as seeds, so poly-A/T tails don't
+create giant buckets.
 
 ## Clustering and comparison
 
@@ -38,6 +49,11 @@ member with the highest mean Phred quality, then the longest. Members match
 their leader, not necessarily the exemplar. `finalize()` resolves assignments to
 exemplars and frees the seed index, leader sequences and comparison buffers,
 keeping only assignments and each cluster's exemplar.
+
+Reads are clustered in input order, without sorting first. Sorting longest
+first helps when shorter reads are absorbed into longer ones; here duplicates
+share both endpoints, so cluster members are already nearly the same length.
+Sorting would also give up single-pass streaming.
 
 New reads are compared with the fixed leader rather than the current exemplar.
 If the comparison target moved to each better member, a cluster could drift:
